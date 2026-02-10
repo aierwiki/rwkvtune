@@ -1,0 +1,138 @@
+"""
+SFT (Supervised Fine-Tuning) training config
+"""
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+@dataclass
+class SFTConfig:
+    """
+    SFT training config class - following trl-main design
+    
+    This config class contains all parameters for SFT training.
+    Users handle data preprocessing and pass processed HuggingFace Dataset to SFTTrainer.
+    
+    Example:
+        ```python
+        from rwkvtune.training import SFTConfig, SFTTrainer
+        from rwkvtune import AutoModel, AutoTokenizer
+        from datasets import Dataset
+        
+        # 1. Load model and tokenizer
+        model = AutoModel.from_pretrained("/path/to/model")
+        tokenizer = AutoTokenizer.from_pretrained("/path/to/model")
+        
+        # 2. Prepare data (user responsibility)
+        def process_sample(example):
+            # User controls how to format dialogue
+            prompt = f"User: {example['instruction']}\\n\\nAssistant: "
+            completion = example['output']
+            
+            # Tokenize
+            prompt_ids = tokenizer.encode(prompt)
+            completion_ids = tokenizer.encode(completion)
+            
+            input_ids = prompt_ids + completion_ids
+            labels = [-100] * len(prompt_ids) + completion_ids  # Only calculate completion loss
+            
+            return {'input_ids': input_ids, 'labels': labels}
+        
+        dataset = Dataset.from_list(data).map(process_sample)
+        
+        # 3. Create config
+        config = SFTConfig(
+            ctx_len=2048,
+            micro_bsz=4,
+        )
+        
+        # 4. Create Trainer and train
+        trainer = SFTTrainer(
+            model=model,
+            args=config,
+            train_dataset=dataset,
+            processing_class=tokenizer,
+        )
+        trainer.train()
+        ```
+    """
+    
+    # ========== Model Architecture (auto-loaded from model, no user setup needed) ==========
+    n_layer: Optional[int] = None
+    n_embd: Optional[int] = None
+    vocab_size: Optional[int] = None
+    head_size_a: Optional[int] = None
+    dim_att_lora: Optional[int] = None
+    dim_gate_lora: Optional[int] = None
+    dim_mv_lora: Optional[int] = None
+    
+    # ========== Derived Parameters (auto-calculated) ==========
+    dim_att: Optional[int] = None
+    dim_ffn: Optional[int] = None
+    head_size_divisor: int = 8
+    my_testing: str = 'x070'  # RWKV7 version identifier
+    
+    # ========== Training Data Parameters ==========
+    # Note: Users prepare dataset themselves, SFTTrainer only accepts processed HuggingFace Dataset
+    ctx_len: int = 2048  # Context length
+    
+    # ========== Training Parameters ==========
+    micro_bsz: int = 4  # Batch size per GPU
+    num_workers: int = 0  # DataLoader worker count
+    dataloader_shuffle: bool = True  # DataLoader shuffle (disable if data is pre-shuffled)
+    epoch_count: int = 10  # Training epochs
+    epoch_steps: Optional[int] = None  # Steps per epoch (None=auto, train full dataset; int=limit steps)
+    epoch_save: int = 1  # Save interval (by epoch)
+    save_every_n_batches: int = 0  # Save interval by batch (0=disabled)
+    save_total_limit: int = 2  # Max checkpoints to keep (0=no limit)
+    save_optimizer_state: bool = True  # Save optimizer state (False saves only weights)
+    resume_from_checkpoint: Optional[str] = None  # Resume checkpoint path (.ckpt file)
+    accumulate_grad_batches: int = 1  # Gradient accumulation
+    
+    # ========== Infinite Context Training Parameters ==========
+    train_type: str = "normal"  # Training type: normal (standard), infctx (infinite context)
+    chunk_ctx: int = 512  # Chunk size for infctx mode (ctx_len must be divisible by chunk_ctx)
+    truncated_bptt: bool = True  # Truncated BPTT (True: truncate gradient, O(chunk_size); False: full, O(seq_len))
+    grad_cp: int = 1  # Gradient checkpoint (0: disabled, 1: enabled, forced for infctx)
+    
+    # ========== Optimizer Parameters ==========
+    lr_init: float = 3e-4  # Initial learning rate
+    lr_final: float = 1e-5  # Final learning rate
+    warmup_steps: int = 50  # Warmup steps
+    weight_decay: float = 0.0  # Weight decay (default 0, consistent with RWKV-PEFT)
+    layerwise_lr: int = 1  # Layer-wise learning rate
+    beta1: float = 0.9  # Adam beta1
+    beta2: float = 0.99  # Adam beta2
+    adam_eps: float = 1e-8  # Adam epsilon
+    grad_clip: float = 1.0  # Gradient clipping
+    
+    # ========== Hardware Parameters ==========
+    accelerator: str = "gpu"  # Accelerator type: gpu, cpu
+    devices: int = 1  # GPU/CPU count
+    strategy: str = "auto"  # Training strategy: auto, ddp, deepspeed_stage_2, deepspeed_stage_3
+    precision: str = "bf16"  # Training precision: fp32, fp16, bf16
+    
+    # ========== Output Config ==========
+    proj_dir: str = "output_sft"  # Output directory
+    seed: int = 42  # Random seed
+    epoch_begin: int = 0  # Starting epoch
+    
+    # ========== LoRA Save Parameters ==========
+    use_lora: bool = False  # Use LoRA (set externally)
+    lora_save_mode: str = "lora_only"  # LoRA save mode:
+        # - lora_only: Only save LoRA weights (recommended, ~100-600MB)
+        # - full: Save merged full model (~26GB)
+        # - both: Save both
+    
+    # ========== Logging and Monitoring ==========
+    report_to: str = ""  # Logging tool: '', 'swanlab', 'tensorboard'
+    run_name: str = ""  # Run name (for logging, auto-generated by default)
+    log_every_n_steps: int = 1  # Log metrics every N optimizer steps
+    
+    def __post_init__(self):
+        """Post-initialization validation"""
+        # Validate infctx config
+        if self.train_type == "infctx":
+            assert self.chunk_ctx > 0, "chunk_ctx must be > 0 for infctx training"
+            assert self.ctx_len % self.chunk_ctx == 0, \
+                f"ctx_len ({self.ctx_len}) must be divisible by chunk_ctx ({self.chunk_ctx})"

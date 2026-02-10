@@ -1,0 +1,28 @@
+{
+  "architecture_version": "rwkv7",
+  "model_name": "RWKV7-0.1B",
+  "description": "RWKV7 0.1B Parameter Model",
+  
+  "model_file": "/nlp/yubin.tang/models/rwkv7-g1/rwkv7-g1-0.1b-20250307-ctx4096.pth",
+  
+  "architecture": {
+    "n_layer": 12,
+    "n_embd": 768,
+    "vocab_size": 65536,
+    "head_size_a": 64,
+    "ctx_len": 4096
+  },
+  
+  "lora_dims": {
+    "dim_att_lora": 64,
+    "dim_gate_lora": 128,
+    "dim_mv_lora": 32
+  },
+  
+  "training": {
+    "recommended_ctx_len": 1024,
+    "recommended_batch_size": 8,
+    "recommended_lr": 3e-4
+  }
+}
+

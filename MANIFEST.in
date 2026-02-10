@@ -1,0 +1,22 @@
+# Include important files
+include LICENSE
+include README.md
+include pyproject.toml
+include MANIFEST.in
+
+# Include package data
+recursive-include rwkvtune/data/tokenizers/vocab *.txt
+recursive-include rwkvtune/models/rwkv7/operators/cuda *.cu *.cpp
+recursive-include rwkvtune/configs/models *.json
+
+# Include type hints marker
+include rwkvtune/py.typed
+
+# Exclude unnecessary files
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *.so
+global-exclude *.dylib
+global-exclude .DS_Store
+global-exclude *.egg-info
+global-exclude .git*
