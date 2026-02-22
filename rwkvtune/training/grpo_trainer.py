@@ -320,6 +320,7 @@ class GRPOTrainer:
         optimizers: tuple = (None, None),
         peft_config: Optional["LoraConfig"] = None,
         loss_mask_func: Optional[Callable] = None,
+        completion_postprocess_fn: Optional[Callable] = None,
     ):
         """
         Args:
@@ -334,6 +335,36 @@ class GRPOTrainer:
             optimizers: Optimizer and scheduler tuple (optional, not implemented yet).
             peft_config: LoRA config (optional). If provided, uses LoRA fine-tuning.
             loss_mask_func: Custom loss mask function (optional).
+            completion_postprocess_fn: Optional post-processing function called after rollout
+                generation and before reward computation.
+                
+                Signature::
+                
+                    fn(
+                        prompts: List[str],          # [B*G] prompt texts
+                        completions: List[str],      # [B*G] generated completion texts
+                        completion_ids: torch.Tensor, # [B*G, C] token IDs (0-padded)
+                        masks: torch.Tensor,          # [B*G, C] bool mask (True = valid token)
+                        tokenizer,                    # tokenizer instance (for encode/decode)
+                        **extra_fields                # dataset extra fields (e.g. ground_truth_answer)
+                    ) -> Dict[str, Any]
+                
+                Must return a dict with **all three** keys::
+                
+                    {
+                        'completions': List[str],      # [B*G] modified texts
+                        'completion_ids': torch.Tensor, # [B*G, C] modified token IDs
+                        'masks': torch.Tensor,          # [B*G, C] modified masks
+                    }
+                
+                IMPORTANT:
+                  - After text processing, re-encode the final text via tokenizer.encode()
+                    to produce new completion_ids, and rebuild masks accordingly.
+                    The old token_ids may no longer match the modified text.
+                  - The returned tensors must keep the same shape [B*G, C] and device as
+                    the inputs.  Pad with 0 if the new sequence is shorter than C;
+                    truncate to C if longer.
+                  - If no modification is needed for a sample, keep it unchanged.
         """
         # Config
         if args is None:
@@ -482,6 +513,12 @@ class GRPOTrainer:
         self.lightning_module.reward_functions = self.reward_functions
         self.lightning_module.reward_weights = self.reward_weights
         self.lightning_module.reward_func_names = self.reward_func_names
+
+        # Pass optional completion post-processing hook to LightningModule
+        self.lightning_module.completion_postprocess_fn = completion_postprocess_fn
+        if completion_postprocess_fn is not None:
+            fn_name = getattr(completion_postprocess_fn, '__name__', type(completion_postprocess_fn).__name__)
+            print(f"Completion post-processing hook: {fn_name}")
 
         print("GRPO Trainer initialization complete\n")
 
@@ -805,6 +842,37 @@ class GRPOTrainer:
         # Create callback
         callbacks = [GRPOTrainingCallback(config, self)]
 
+        # Configure logger (SwanLab / WandB)
+        pl_logger = False
+        if config.report_to and config.report_to.lower() == "swanlab":
+            try:
+                from swanlab.integration.pytorch_lightning import SwanLabLogger
+                run_name = config.run_name if config.run_name else f"rwkvtune-grpo-{time.strftime('%Y%m%d-%H%M%S')}"
+                pl_logger = SwanLabLogger(
+                    project="rwkvtune-grpo",
+                    experiment_name=run_name,
+                    config=vars(config),
+                )
+                print(f"[LOGGER] SwanLab Logger created: project=rwkvtune-grpo, run={run_name}")
+            except ImportError:
+                print("[LOGGER] swanlab not installed, run: pip install swanlab")
+            except Exception as e:
+                print(f"[LOGGER] SwanLab initialization failed: {e}")
+        elif config.report_to and config.report_to.lower() == "wandb":
+            try:
+                from lightning.pytorch.loggers import WandbLogger
+                run_name = config.run_name if config.run_name else f"rwkvtune-grpo-{time.strftime('%Y%m%d-%H%M%S')}"
+                pl_logger = WandbLogger(
+                    project="rwkvtune-grpo",
+                    name=run_name,
+                    config=vars(config),
+                )
+                print(f"[LOGGER] WandB Logger created: project=rwkvtune-grpo, run={run_name}")
+            except ImportError:
+                print("[LOGGER] wandb not installed, run: pip install wandb")
+            except Exception as e:
+                print(f"[LOGGER] WandB initialization failed: {e}")
+
         # Create trainer parameters
         trainer_kwargs = dict(
             accelerator=config.accelerator,
@@ -816,9 +884,9 @@ class GRPOTrainer:
             accumulate_grad_batches=config.accumulate_grad_batches,
             callbacks=callbacks,
             enable_checkpointing=False,
-            logger=False,
+            logger=pl_logger,
             num_sanity_val_steps=0,
-            log_every_n_steps=config.log_steps,
+            log_every_n_steps=config.log_steps if pl_logger else int(1e20),
             # Important: Use custom sampler/batch_sampler to implement "repeat batch" semantics
             use_distributed_sampler=False,
         )

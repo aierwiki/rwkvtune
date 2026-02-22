@@ -22,6 +22,26 @@ import time
 from rwkvtune.inference.core import TokenSampler
 
 
+def _apply_repetition_penalty(
+    logits: torch.Tensor,
+    token_ids_per_row: List[List[int]],
+    penalty: float,
+) -> None:
+    """Apply repetition penalty in-place to suppress repeated tokens.
+    logits: [B, V]. token_ids_per_row: for each row, list of token ids already generated (to penalize).
+    penalty > 1: reduce probability of repeating these tokens.
+    """
+    if penalty == 1.0 or penalty <= 0:
+        return
+    for i in range(logits.shape[0]):
+        for tid in token_ids_per_row[i]:
+            if 0 <= tid < logits.shape[1]:
+                if logits[i, tid].item() > 0:
+                    logits[i, tid] = logits[i, tid] / penalty
+                else:
+                    logits[i, tid] = logits[i, tid] * penalty
+
+
 @dataclass
 class GRPOSequence:
     """Simplified sequence state (for GRPO only)"""
@@ -82,7 +102,12 @@ class GRPOBatchGenerator:
         
         # Set max valid token ID to ban out-of-vocab tokens
         if hasattr(tokenizer, 'idx2token') and tokenizer.idx2token:
-            TokenSampler._max_valid_token_id = max(tokenizer.idx2token.keys())
+            max_token_id = max(tokenizer.idx2token.keys())
+            TokenSampler._max_valid_token_id = max_token_id
+            model_vocab_size = getattr(model.config, 'vocab_size', None)
+            if model_vocab_size and model_vocab_size > max_token_id + 1:
+                print(f"[GRPOBatchGenerator] [INFO] Model vocab_size={model_vocab_size}, tokenizer max ID={max_token_id}")
+                print(f"[GRPOBatchGenerator] [INFO] Will ban token IDs {max_token_id + 1} to {model_vocab_size - 1} during sampling")
         
         self.n_layer = model.config.n_layer
         self.n_embd = model.config.n_embd
@@ -95,6 +120,7 @@ class GRPOBatchGenerator:
         temperature: float = 0.9,
         top_p: float = 0.9,
         top_k: int = 0,
+        repetition_penalty: float = 1.0,
         logit_bias: Optional[dict] = None,
     ) -> Dict[str, Any]:
         """
@@ -110,6 +136,7 @@ class GRPOBatchGenerator:
             temperature: Sampling temperature
             top_p: Top-p sampling
             top_k: Top-k sampling
+            repetition_penalty: Penalize already-generated tokens (>1 suppresses repetition)
             logit_bias: Token ID to bias mapping (ban certain tokens)
         
         Returns:
@@ -187,7 +214,7 @@ class GRPOBatchGenerator:
         print(f"[GRPOBatchGenerator]   - chunk_size: {self.chunk_size}")
         print(f"[GRPOBatchGenerator]   - max_prefill_batch_size: {self.max_prefill_batch_size if self.max_prefill_batch_size > 0 else 'unlimited'}")
         
-        self._chunked_prefill(unique_sequences, unique_states, temperature, top_p, top_k, logit_bias)
+        self._chunked_prefill(unique_sequences, unique_states, temperature, top_p, top_k, repetition_penalty, logit_bias)
         
         prefill_time = time.time() - prefill_start
         prefill_throughput = total_prompt_tokens / prefill_time if prefill_time > 0 else 0
@@ -232,13 +259,19 @@ class GRPOBatchGenerator:
             src_states = unique_states[layer_idx]['ffn_x_prev'][src_indices_tensor].clone()
             all_states[layer_idx]['ffn_x_prev'][dst_indices_tensor] = src_states
         
-        # Sample first token for each generation path
+        # Sample first token for each generation path (apply repetition penalty to prompt tokens)
         for seq_idx in range(total):
             seq = sequences[seq_idx]
             unique_seq = unique_seq_map[seq_idx]
             
             if hasattr(unique_seq, '_prefill_logits') and unique_seq._prefill_logits is not None:
-                prefill_logits = unique_seq._prefill_logits
+                prefill_logits = unique_seq._prefill_logits.clone()
+                _apply_repetition_penalty(
+                    prefill_logits.unsqueeze(0),
+                    [seq.prompt_tokens],
+                    repetition_penalty,
+                )
+                prefill_logits = prefill_logits.squeeze(0)
                 token_id, _ = self.sampler.sample(
                     prefill_logits,
                     temperature=temperature,
@@ -257,7 +290,13 @@ class GRPOBatchGenerator:
                 batch_states = self._extract_batch_states(all_states, [seq_idx])
                 with torch.no_grad():
                     logits, _ = self.model.forward_with_state(last_token, states=batch_states)
-                next_token_logits = logits[0, -1, :].to(torch.float32)
+                next_token_logits = logits[0, -1, :].to(torch.float32).clone()
+                _apply_repetition_penalty(
+                    next_token_logits.unsqueeze(0),
+                    [seq.prompt_tokens],
+                    repetition_penalty,
+                )
+                next_token_logits = next_token_logits.squeeze(0)
                 token_id, _ = self.sampler.sample(
                     next_token_logits,
                     temperature=temperature,
@@ -282,7 +321,7 @@ class GRPOBatchGenerator:
         print(f"[GRPOBatchGenerator] Starting Decode ({total} sequences, max_new_tokens={max_new_tokens})...")
         print(f"[GRPOBatchGenerator]   - max_decode_batch_size: {self.max_decode_batch_size if self.max_decode_batch_size > 0 else 'unlimited'}")
         decode_start = time.time()
-        decode_stats = self._batch_decode(sequences, all_states, max_new_tokens, temperature, top_p, top_k, logit_bias)
+        decode_stats = self._batch_decode(sequences, all_states, max_new_tokens, temperature, top_p, top_k, repetition_penalty, logit_bias)
         decode_time = time.time() - decode_start
         
         total_generated_tokens = sum(seq.num_generated for seq in sequences)
@@ -318,6 +357,7 @@ class GRPOBatchGenerator:
         temperature: float,
         top_p: float,
         top_k: int,
+        repetition_penalty: float = 1.0,
         logit_bias: Optional[dict] = None,
     ):
         """
@@ -423,6 +463,7 @@ class GRPOBatchGenerator:
         temperature: float,
         top_p: float,
         top_k: int,
+        repetition_penalty: float = 1.0,
         logit_bias: Optional[dict] = None,
     ):
         """Optimized batch decode with vectorized operations"""
@@ -460,15 +501,15 @@ class GRPOBatchGenerator:
                     batch_active_seqs = active_sequences[batch_start:batch_end]
                     batch_active_indices = active_indices[batch_start:batch_end]
                     self._process_decode_batch(
-                        batch_active_seqs, all_states, 
-                        temperature, top_p, top_k, max_new_tokens,
-                        finished_mask, batch_active_indices, logit_bias
+                        batch_active_seqs, all_states,
+                        temperature, top_p, top_k, repetition_penalty,
+                        max_new_tokens, finished_mask, batch_active_indices, logit_bias
                     )
             else:
                 self._process_decode_batch(
-                    active_sequences, all_states, 
-                    temperature, top_p, top_k, max_new_tokens,
-                    finished_mask, active_indices, logit_bias
+                    active_sequences, all_states,
+                    temperature, top_p, top_k, repetition_penalty,
+                    max_new_tokens, finished_mask, active_indices, logit_bias
                 )
             
             step_time = time.time() - step_start_time
@@ -500,6 +541,7 @@ class GRPOBatchGenerator:
         temperature: float,
         top_p: float,
         top_k: int,
+        repetition_penalty: float,
         max_new_tokens: int,
         finished_mask: List[bool],
         active_indices: List[int],
@@ -542,6 +584,12 @@ class GRPOBatchGenerator:
         self._update_batch_states(all_states, new_states, batch_indices)
         
         next_token_logits = logits[:, -1, :].to(torch.float32)
+        # Apply repetition penalty: penalize tokens already in prompt + generated so far
+        token_ids_per_row = [
+            seq.prompt_tokens + seq.generated_tokens
+            for seq in valid_sequences
+        ]
+        _apply_repetition_penalty(next_token_logits, token_ids_per_row, repetition_penalty)
         
         token_ids, _ = self.sampler.sample_batch(
             next_token_logits,
@@ -647,15 +695,36 @@ class GRPOBatchGenerator:
                 if len(tokens_to_decode) == 0:
                     completion_text = ""
                 else:
-                    completion_text = self.tokenizer.decode(tokens_to_decode)
-                    if completion_text == '\ufffd' and len(seq.generated_tokens) == 1:
+                    try:
+                        completion_text = self.tokenizer.decode(tokens_to_decode)
+                    except (KeyError, UnicodeDecodeError) as e:
+                        # Tolerant fallback: avoid whole completion becoming single \ufffd
+                        tok = getattr(self.tokenizer, "idx2token", None)
+                        if tok is not None:
+                            parts = [tok.get(tid, b"?") for tid in tokens_to_decode]
+                            completion_text = b"".join(parts).decode("utf-8", errors="replace")
+                            if not hasattr(GRPOBatchGenerator, "_decode_exc_warn_count"):
+                                GRPOBatchGenerator._decode_exc_warn_count = 0
+                            GRPOBatchGenerator._decode_exc_warn_count += 1
+                            if GRPOBatchGenerator._decode_exc_warn_count <= 20:
+                                bad_id = e.args[0] if isinstance(e, KeyError) else None
+                                print(
+                                    f"[GRPOBatchGenerator._collect_results] [WARN] decode raised {type(e).__name__}: {e}"
+                                    + (f" (bad token_id={bad_id})" if bad_id is not None else "")
+                                )
+                        else:
+                            completion_text = ""
+                    # Check for decode errors (replacement char indicates invalid token sequence)
+                    if completion_text and "\ufffd" in completion_text:
                         if not hasattr(GRPOBatchGenerator, '_decode_fail_warn_count'):
                             GRPOBatchGenerator._decode_fail_warn_count = 0
                         GRPOBatchGenerator._decode_fail_warn_count += 1
                         
-                        if GRPOBatchGenerator._decode_fail_warn_count <= 5:
-                            print(f"[GRPOBatchGenerator._collect_results] [WARN] Sequence {seq.seq_id} decode failed, tokens: {seq.generated_tokens}")
-                        completion_text = ""
+                        if GRPOBatchGenerator._decode_fail_warn_count <= 10:
+                            print(f"[GRPOBatchGenerator._collect_results] [WARN] Sequence {seq.seq_id} decode failed: "
+                                  f"tokens={tokens_to_decode[:20]}{'...' if len(tokens_to_decode) > 20 else ''}, "
+                                  f"decoded='{completion_text[:50]}...'")
+                        # Keep the decoded text (even if it has errors) so we can see what happened
                 
                 completions.append(completion_text)
                 
@@ -671,7 +740,7 @@ class GRPOBatchGenerator:
         masks = torch.zeros_like(completion_ids, dtype=torch.bool)
         for i, seq in enumerate(sequences):
             masks[i, :len(seq.generated_tokens)] = True
-        
+
         return {
             'completions': completions,
             'completion_ids': completion_ids,

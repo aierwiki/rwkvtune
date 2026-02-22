@@ -35,27 +35,63 @@ def load_test_samples(data_file: str, num_samples: int = 3):
 
 def extract_prompt(conversations: list) -> str:
     """
-    Extract prompt from conversation (system + first user turn).
-    
-    Note: RWKV7 supports thinking mode. To skip thinking and respond directly,
-    add empty <think>\n\n</think> tags after Assistant:
+    Extract prompt for RWKV7 thinking mode:
+    - Merge original system messages as background description
+    - Append explicit format / style instruction
+    - Use first user turn as query
+    - End with 'Assistant:\\n<think>' so model writes hidden reasoning first
     """
-    prompt_parts = []
-    
-    # RWKV7 thinking mode: empty think tags to skip thinking
-    THINK_PREFIX = "<think>\n\n</think>"
+    system_contents = []
+    first_user = None
     
     for turn in conversations:
         role = turn.get('from', '').lower()
         content = turn.get('value', '')
         
         if role == 'system':
-            prompt_parts.append(f"System: {content}\n\n")
+            system_contents.append(content.strip())
         elif role in ('human', 'user'):
-            prompt_parts.append(f"User: {content}\n\nAssistant:{THINK_PREFIX}")
+            first_user = content.strip()
             break  # Only take first user turn
     
-    return ''.join(prompt_parts)
+    # Fallback if no system or user found
+    if first_user is None:
+        return ""
+    
+    base_system = " ".join(system_contents).strip() if system_contents else ""
+    
+    format_instruction = (
+        "You are Trey, a playful, flirty young man in a romantic story. "
+        "Your job is to continue the scene in character.\n\n"
+        "Output FORMAT (STRICT):\n"
+        "1) First write your hidden reasoning inside <think>...</think> (about 60-150 tokens).\n"
+        "   - Think only about feelings, intentions and next actions in the current scene.\n"
+        "   - Do NOT mention 'format', 'instructions', 'I will respond like this', or any meta commentary.\n"
+        "2) After </think>, write ONE short in-character reply (1-2 sentences, 10-30 tokens total).\n"
+        "   - Use *action* style for physical actions, plain text for speech.\n"
+        "   - Move the scene forward: new action or new line of dialogue, not restating the same idea.\n"
+        "   - Do NOT repeat the same sentence pattern more than once.\n"
+        "3) Very important:\n"
+        "   - Do NOT talk about yourself as an AI or about instructions.\n"
+        "   - Do NOT explain your reasoning to the user.\n"
+        "   - Do NOT add code, tables, lists, or separate tasks.\n"
+        "Example:\n"
+        "<think>She looks shy but curious. I should tease her a bit, move closer, and keep the mood light instead of over-explaining.</think>\n"
+        "*grins, leaning closer* Oh? A better idea than movie night? Now you have to show me, or I’ll die of curiosity here.\n"
+    )
+    
+    system_block_parts = []
+    if base_system:
+        system_block_parts.append(base_system)
+    system_block_parts.append(format_instruction)
+    
+    system_block = "System: " + "\n\n".join(system_block_parts) + "\n\n"
+    user_block = f"User: {first_user}\n\n"
+    
+    # Let the model start thinking
+    assistant_block = "Assistant:\n<think>"
+    
+    return system_block + user_block + assistant_block
 
 
 def extract_reference(conversations: list) -> str:
@@ -86,6 +122,8 @@ def main():
                         help="Sampling temperature")
     parser.add_argument("--top_p", type=float, default=0.9,
                         help="Top-p sampling parameter")
+    parser.add_argument("--repetition_penalty", type=float, default=1.0,
+                        help="Repetition penalty (>1 suppresses repetition, 1 = off)")
     parser.add_argument("--eos_token_id", type=int, default=261,
                         help="EOS token ID (RWKV default 261 = \\n\\n)")
     parser.add_argument("--device", type=str, default="cuda",
@@ -101,7 +139,8 @@ def main():
         print(f"LoRA path: {args.lora_path}")
     print(f"Test data: {args.data_file}")
     print(f"Test samples: {args.num_samples}")
-    print(f"Generation params: max_tokens={args.max_new_tokens}, temp={args.temperature}, top_p={args.top_p}")
+    print(f"Generation params: max_tokens={args.max_new_tokens}, temp={args.temperature}, top_p={args.top_p}, "
+          f"repetition_penalty={args.repetition_penalty}")
     print("=" * 60)
     
     # 1. Load model and tokenizer
@@ -156,6 +195,7 @@ def main():
                 max_new_tokens=args.max_new_tokens,
                 temperature=args.temperature,
                 top_p=args.top_p,
+                repetition_penalty=args.repetition_penalty,
                 do_sample=True,
                 eos_token_id=args.eos_token_id,
             )

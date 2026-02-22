@@ -24,15 +24,6 @@ except ImportError:
   DeepSpeedCPUAdam = None
   FusedAdam = None
 
-# SwanLab is an optional dependency
-try:
-  import swanlab
-  SWANLAB_AVAILABLE = True
-except (ImportError, Exception) as e:
-  # Catch all exceptions, including swanlab internal errors
-  SWANLAB_AVAILABLE = False
-  swanlab = None
-
 from rwkvtune.models.rwkv7 import RWKV7Model
 from rwkvtune.training.grpo.loss import get_loss_function
 from rwkvtune.training.grpo.utils import selective_log_softmax
@@ -182,7 +173,7 @@ class GRPOLightningModule(pl.LightningModule):
       print("[OK] Using LoRA: reference model via disable_adapter, saving memory")
     
     # Get loss function
-    self.loss_fn = get_loss_func(config.loss_type, config)
+    self.loss_fn = get_loss_function(config.loss_type, config)
     
     # Detect DeepSpeed offload
     self.deepspeed_offload = (
@@ -206,6 +197,21 @@ class GRPOLightningModule(pl.LightningModule):
     # Note：rollout data only generated in on_train_batch_start “generation phase”generated，thereforesavecan only happen at rollout time。
     # to make save_rollout_steps=100 semantics more intuitive（instead of requiring exact division），using“distance from lasttimessaveexceeds threshold thensave”strategy。
     self._last_saved_rollout_training_step_count: Optional[int] = None
+
+    # Cache for GRPO data (generation, rewards, advantages)
+    self.current_grpo_data = None
+    self._buffered_grpo_data = []
+    self._buffer_step = 0
+    self._generation_step = 0
+    self._active_prompt_batch_signature: Optional[tuple] = None
+    self._active_rollout_generation_step: Optional[int] = None
+    self.generator = None
+    self.reward_functions = None
+    self.reward_weights = None
+    self.reward_func_names = None
+    self.completion_postprocess_fn = None  # optional hook: called after rollout, before reward
+    self._metrics = defaultdict(list)
+    self._rollout_buffer = []
 
   def set_skip_steps(self, steps: int):
     """Set steps to skip (for checkpoint resume)"""
@@ -288,67 +294,8 @@ class GRPOLightningModule(pl.LightningModule):
       except Exception as e2:
         print(f"[ERROR] [Resume] Manual load failed too: {e2}")
     
-    self.resume_checkpoint_path = None # Prevent duplicate loading
+    self.resume_checkpoint_path = None  # Prevent duplicate loading
 
-    
-    # Cache for GRPO data (generation, rewards, advantages)
-    self.current_grpo_data = None
-    
-    # ========== TRL-style Buffering（memory optimization）==========
-    # ref TRL implementation：every N stepsgenerate once，bufferresults，use in batches
-    # https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_trainer.py#L1030
-    self._buffered_grpo_data = [] # buffer GRPO data list
-    self._buffer_step = 0     # currently using buffer index
-    self._generation_step = 0   # count unit=training_step（onceforward+backward），fordecide when to re- rollout
-
-    # ====== strict semantic validation：avoid“DataLoader advances but no rollout”causing samples to be skipped ======
-    # background：
-    # - we rollout trigger frequency is generate_every=steps_per_generation*num_iterations（in training_step counted）
-    # - training phaseevery training_step will call on_train_batch_start（at this point DataLoader will provide a batch）
-    #
-    # key semantics（must be satisfied，otherwise samples will be skipped）：
-    # - same batch prompt batch must be in DataLoader be repeated generate_every times
-    #  * 1 times（group_offset==0）：do rollout，generate micro_bsz*num_generations completion samples，split into steps_per_generation parts write to buffer
-    #  * subsequent（group_offset!=0）：only from buffer take slicesdotraining，no longer rollout
-    # - this way “rollout once -> continuoustrainingmanysteps -> then enter next batch prompts” is valid
-    #
-    # e.g.result DataLoader no repeat batch（or was Lightning auto-replaced sampler），will cause：
-    # - DataLoader everystepsgive new prompt
-    # - but rollout was generate_every downsampled
-    # => many prompt wasreadtobutfromnot rollout / fromnotparamwithtraining（very hidden and“appears to work”）
-    self._active_prompt_batch_signature: Optional[tuple] = None
-    self._active_rollout_generation_step: Optional[int] = None
-    
-    # generateengine and reward functions（in setup initialized in）
-    self.generator = None # use new BatchGenerator
-    self.reward_functions = None # List of reward functions (follows trl-main design)
-    self.reward_weights = None
-    self.reward_func_names = None # List of reward func names
-    
-    # ========== logging and monitoring initialization ==========
-    self._metrics = defaultdict(list) # store metrics: {metric_name: [values]}
-    self._rollout_buffer = [] # store rollout data
-    
-    # Initialize SwanLab (if configured)
-    if config.report_to == "swanlab":
-      if not SWANLAB_AVAILABLE:
-        print("[WARN] [WARN] SwanLab not installed, skipping logging")
-        print("  Install via: pip install swanlab")
-        self.use_swanlab = False
-      else:
-        self.use_swanlab = True
-        # SwanLab will in setup initialized in（needindistributedenvironmentin）
-    else:
-      self.use_swanlab = False
-    
-    # Create rollout save directory
-    if config.save_rollout_steps > 0:
-      os.makedirs(config.save_rollout_path, exist_ok=True)
-      print(f"[OK] Rollout data will be saved to: {config.save_rollout_path}")
-      print(
-        f" savefrequency: every {config.save_rollout_steps} training_step triggeronce（onlywill inhappen rollout step actually saved，"
-        f"thereforeactualsavestepsnumberwillaligntomostnear rollout step）"
-      )
   
   def setup(self, stage: str):
     """
@@ -377,6 +324,11 @@ class GRPOLightningModule(pl.LightningModule):
       
       print(f"[OK] [Rank {self.global_rank}] use {len(self.reward_functions)} reward functions")
 
+      if self.config.save_rollout_steps > 0:
+        os.makedirs(self.config.save_rollout_path, exist_ok=True)
+        if self.global_rank == 0:
+          print(f"[OK] Rollout data will be saved to: {self.config.save_rollout_path}")
+
       if self._use_peft:
         try:
           from rwkvtune.peft.lora.layer import LoraLinear
@@ -404,20 +356,6 @@ class GRPOLightningModule(pl.LightningModule):
         except Exception as e:
           if self.global_rank == 0:
             print(f"[Rank 0] [LORA_HOOK_DIAG] hook failed: {e}")
-      
-      # initialize SwanLab（onlyin rank 0）
-      if self.use_swanlab and self.global_rank == 0:
-        try:
-          swanlab.init(
-            project="rwkv-grpo",
-            experiment_name=self.config.run_name or f"grpo_{self.config.model_config}",
-            config=vars(self.config),
-            logdir=self.config.proj_dir,
-          )
-          print(f"[OK] [Rank 0] SwanLab initialized")
-        except Exception as e:
-          print(f"[WARN] [Rank 0] SwanLab init failed: {e}")
-          self.use_swanlab = False
       
       print(f"[OK] [Rank {self.global_rank}] GRPO groupconditioninitialized")
   
@@ -826,6 +764,7 @@ class GRPOLightningModule(pl.LightningModule):
       print(f"[Rank {self.trainer.global_rank}]   * temperature: {config.temperature}")
       print(f"[Rank {self.trainer.global_rank}]   * top_p: {config.top_p}")
       print(f"[Rank {self.trainer.global_rank}]   * top_k: {config.top_k}")
+      print(f"[Rank {self.trainer.global_rank}]   * repetition_penalty: {getattr(config, 'repetition_penalty', 1.0)}")
       total_sequences = len(batch['prompts']) * config.num_generations
       print(f"[Rank {self.trainer.global_rank}] [Rollout] [GRPOBatchGenerator] [RUN] startgenerate {total_sequences} sequence... (startcountedtime)")
       
@@ -837,12 +776,13 @@ class GRPOLightningModule(pl.LightningModule):
           gen_start_ts = time.time()
           # [RUN] use GRPOBatchGenerator directlyinterface（not needed GenerationConfig）
           generation_results = self.generator.generate(
-            input_ids=batch['input_ids'], # already tokenized input
+            input_ids=batch['input_ids'],  # already tokenized input
             max_new_tokens=config.max_completion_length,
             num_generations=config.num_generations,
             temperature=config.temperature,
             top_p=config.top_p,
             top_k=config.top_k,
+            repetition_penalty=getattr(config, 'repetition_penalty', 1.0),
             logit_bias=getattr(config, 'logit_bias', None),
           )
           gen_end_ts = time.time()
@@ -933,6 +873,37 @@ class GRPOLightningModule(pl.LightningModule):
               f"Expected: {expected_completions}, Actual: {len(value)}"
             )
       
+      # ========== Optional: Completion Post-Processing Hook ==========
+      # Called after rollout generation and before reward computation.
+      # The hook receives completions, completion_ids, masks, tokenizer, etc.
+      # and is fully responsible for returning the modified versions.
+      # See completion_postprocess_fn docstring for the input/output contract.
+      if self.completion_postprocess_fn is not None:
+        print(f"[Rank {self.trainer.global_rank}] [POSTPROCESS] Calling completion_postprocess_fn...")
+        postprocess_result = self.completion_postprocess_fn(
+          prompts=expanded_prompts,
+          completions=list(generation_results['completions']),
+          completion_ids=generation_results['completion_ids'],
+          masks=generation_results['masks'],
+          tokenizer=self.tokenizer,
+          **extra_fields
+        )
+        if not isinstance(postprocess_result, dict):
+          raise TypeError(
+            f"completion_postprocess_fn must return a dict with keys "
+            f"'completions', 'completion_ids', 'masks'. Got {type(postprocess_result).__name__}"
+          )
+        for required_key in ('completions', 'completion_ids', 'masks'):
+          if required_key not in postprocess_result:
+            raise KeyError(
+              f"completion_postprocess_fn return dict missing required key '{required_key}'. "
+              f"Got keys: {list(postprocess_result.keys())}"
+            )
+        generation_results['completions'] = postprocess_result['completions']
+        generation_results['completion_ids'] = postprocess_result['completion_ids']
+        generation_results['masks'] = postprocess_result['masks']
+        print(f"[Rank {self.trainer.global_rank}] [POSTPROCESS] [OK] Post-processing applied")
+
       # Compute rewards (follows trl-main design)
       print(f"[Rank {self.trainer.global_rank}] [REWARD] [INFO] Start computing rewards...")
       # [INFO] [DEBUG] Print extra_fields keys to help locate data passing issues
@@ -1061,7 +1032,10 @@ class GRPOLightningModule(pl.LightningModule):
         from rwkvtune.training.grpo.advantage import AdvantageCalculator
         advantage_calculator = AdvantageCalculator(
           scale_rewards=config.scale_rewards,
-          num_generations=config.num_generations
+          num_generations=config.num_generations,
+          advantage_clip=getattr(config, 'advantage_clip', None),
+          low_reward_threshold=getattr(config, 'low_reward_threshold', None),
+          low_reward_scale=getattr(config, 'low_reward_scale', 0.01),
         )
         global_advantages = advantage_calculator.compute_advantages(global_rewards)
       
@@ -1676,7 +1650,7 @@ class GRPOLightningModule(pl.LightningModule):
         # Note：hereweusestrategymodel logits fromcountedcomputeentropy
         # forsavevisiblestore/save，weonlyinrecordlogtimecountedcompute（is notevery step allcountedcompute）
         mean_entropy = torch.tensor(0.0, device=self.device) # default value
-        if self.use_swanlab or getattr(self.config, 'log_entropy', True):
+        if getattr(self.config, 'log_entropy', True):
           try:
             # re-countedcompute logits（onlycountedcomputeonce，forentropy）
             # forsavevisiblestore/save，weusecomparesmall batch_size
@@ -1748,8 +1722,8 @@ class GRPOLightningModule(pl.LightningModule):
         min_completion_length = completion_lengths.float().min()
         max_completion_length = completion_lengths.float().max()
       
-      # 6. recordlog（Lightning）
-      # align TRL：here“samples”granularityis completion（B*G expandafter N rows）
+      # 6. Record metrics via Lightning logger
+      # Align TRL: "sample" granularity is completion (B*G rows after expansion)
       self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True, batch_size=actual_num_samples)
       self.log("clip_ratio", clip_ratio, prog_bar=True, on_step=True, on_epoch=False, sync_dist=True, batch_size=actual_num_samples)
       self.log("clip_ratio/region_mean", region_clip_ratio, prog_bar=False, on_step=True, on_epoch=False, sync_dist=True, batch_size=actual_num_samples)
@@ -1763,9 +1737,11 @@ class GRPOLightningModule(pl.LightningModule):
       self.log("completions/mean_length", mean_completion_length, prog_bar=False, on_step=True, on_epoch=False, sync_dist=True, batch_size=actual_num_samples)
       self.log("completions/min_length", min_completion_length, prog_bar=False, on_step=True, on_epoch=False, sync_dist=True, batch_size=actual_num_samples)
       self.log("completions/max_length", max_completion_length, prog_bar=False, on_step=True, on_epoch=False, sync_dist=True, batch_size=actual_num_samples)
+      self.log("lr", self.trainer.optimizers[0].param_groups[0]['lr'], prog_bar=True, on_step=True, on_epoch=False, rank_zero_only=True)
       
-      # 8. recordto SwanLab（ref trl-main）
-      if self.use_swanlab and self.global_rank == 0:
+      # 8. Aggregate metrics (for potential external loggers); actual logging
+      # is handled by Lightning's logger integration (e.g., SwanLabLogger).
+      if self.global_rank == 0:
         metrics = {
           'train/loss': loss.item(),
           'train/clip_ratio': clip_ratio.item(),
@@ -1782,15 +1758,12 @@ class GRPOLightningModule(pl.LightningModule):
           'train/completions/max_length': max_completion_length.item(),
           'train/lr': self.trainer.optimizers[0].param_groups[0]['lr'],
         }
-        
-        # addofbeforecollectmetric（avgvalue）
+
         for key, values in self._metrics.items():
           if len(values) > 0:
             metrics[f'train/{key}'] = sum(values) / len(values)
-        
+
         self._log_metrics(metrics, self.training_step_count)
-        
-        # clear metricsbuffer
         self._metrics.clear()
       
       self.training_step_count += 1
@@ -2194,17 +2167,19 @@ class GRPOLightningModule(pl.LightningModule):
   
   def _log_metrics(self, metrics: Dict[str, float], step: int):
     """
-    recordmetricto SwanLab
-    
-    ref trl-main GRPO implementationrecordkeymetric
+    Log aggregated GRPO metrics (per-reward-func stats, etc.) via
+    Lightning's self.log() so they are picked up by the configured logger
+    (SwanLab / WandB).  Core training metrics (loss, clip_ratio, etc.) are
+    already logged directly in training_step; this method handles the
+    supplementary metrics accumulated in the ``_metrics`` buffer during
+    the rollout phase.
     """
-    if not self.use_swanlab or self.global_rank != 0:
+    if not metrics:
       return
-    
-    try:
-      swanlab.log(metrics, step=step)
-    except Exception as e:
-      print(f"[WARN] SwanLab logging failed: {e}")
+    for key, value in metrics.items():
+      if isinstance(value, (int, float)):
+        self.log(key, value, prog_bar=False, on_step=True, on_epoch=False,
+                 rank_zero_only=True)
   
   def _save_rollout_data(self, rollout_data: Dict[str, Any], step: int):
     """
@@ -2309,7 +2284,7 @@ class GRPOLightningModule(pl.LightningModule):
       
       saved_count = 0
       with open(save_path, 'w', encoding='utf-8') as f:
-        # [INFO] getget completion_ids（e.g.resultstore/savein）
+        # Get completion_ids for debugging decode issues
         completion_ids = rollout_data.get('completion_ids', None)
         
         for i in range(len(rollout_data['prompts'])):
@@ -2320,31 +2295,37 @@ class GRPOLightningModule(pl.LightningModule):
           item = {
             'step': step,
             'prompt': rollout_data['prompts'][i],
-            'completion': completion, # [INFO] ensurecompletesave，not truncate
+            'completion': completion,  # ensure full text is saved
             'reward': float(rollout_data['rewards'][i]),
             'advantage': float(rollout_data['advantages'][i]),
           }
           
-          # [INFO] add completion_ids (forlocate garbled charsandstop problem）
+          # Add completion_ids for debugging decode issues (e.g., invalid tokens causing "�")
           if completion_ids is not None:
-            # completion_ids is tensor [B*G, C]，needconvertfor list
             try:
               if isinstance(completion_ids, torch.Tensor):
-                comp_ids = completion_ids[i].cpu().tolist() # [C]
+                comp_ids = completion_ids[i].cpu().tolist()  # [C]
               elif isinstance(completion_ids, np.ndarray):
-                comp_ids = completion_ids[i].tolist() # [C]
+                comp_ids = completion_ids[i].tolist()  # [C]
               elif isinstance(completion_ids, (list, tuple)):
-                comp_ids = list(completion_ids[i]) # [C]
+                comp_ids = list(completion_ids[i])  # [C]
               else:
                 comp_ids = None
               
               if comp_ids is not None:
-                # keepplacehave tokens（including padding）infor complete diagnosis
-                item['completion_ids'] = comp_ids
-                # countedcomputeactual token count（exclude padding token 0）
-                item['completion_token_count'] = sum(1 for t in comp_ids if t != 0)
+                # Remove padding (0) tokens for cleaner output
+                comp_ids_clean = [tid for tid in comp_ids if tid != 0]
+                item['completion_ids'] = comp_ids_clean
+                item['completion_token_count'] = len(comp_ids_clean)
+                
+                # Check for decode errors (contains replacement char)
+                if '\ufffd' in completion or (completion == '\ufffd'):
+                  item['decode_error'] = True
+                  item['decode_error_tokens'] = comp_ids_clean
+                  if saved_count < 5:  # Warn first few
+                    print(f"[Rank {self.global_rank}] [WARN] Decode error detected for sample {i}: "
+                          f"completion='{completion[:50]}...', tokens={comp_ids_clean[:20]}...")
             except Exception as e:
-              # e.g.resultprovidegetfailed，recorderrorbutnot interruptsave
               item['completion_ids_error'] = str(e)
           
           # add label_completion（e.g.resulthave）- thisis </think> part to be learned after

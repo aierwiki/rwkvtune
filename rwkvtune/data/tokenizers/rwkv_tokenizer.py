@@ -150,25 +150,18 @@ class TRIE_TOKENIZER():
                 print(f"[DEBUG DECODE] Invalid token IDs: {invalid_tokens[:10]}")
             print(f"[DEBUG DECODE] Decoding {len(tokens)} tokens, last 5: {tokens[-5:] if len(tokens) >= 5 else tokens}")
         
-        try:
-            raw_bytes = self.decodeBytes(tokens)
-            result = raw_bytes.decode('utf-8')
-            if debug_decode:
-                print(f"[DEBUG DECODE] Decode success, result length: {len(result)}")
-            return result
-        except Exception as e:
-            if debug_decode:
-                print(f"[DEBUG DECODE] Decode failed: {e}")
-                for i, t in enumerate(tokens[-20:]):
-                    try:
-                        if t in self.idx2token:
-                            single_bytes = self.idx2token[t]
-                            single_text = single_bytes.decode('utf-8')
-                        else:
-                            print(f"[DEBUG DECODE]   token[{len(tokens)-20+i}]={t}: not in vocab!")
-                    except:
-                        print(f"[DEBUG DECODE]   token[{len(tokens)-20+i}]={t}: decode failed, bytes={self.idx2token.get(t, 'N/A')}")
-            return '\ufffd'
+        # Tolerate unknown token IDs and invalid UTF-8 so one bad token does not make whole completion "\ufffd"
+        parts = []
+        for tid in tokens:
+            if tid in self.idx2token:
+                parts.append(self.idx2token[tid])
+            else:
+                parts.append(b'?')
+        raw_bytes = b''.join(parts)
+        result = raw_bytes.decode('utf-8', errors='replace')
+        if debug_decode:
+            print(f"[DEBUG DECODE] Decode success, result length: {len(result)}")
+        return result
 
     def printTokens(self, tokens):
         for i in tokens:

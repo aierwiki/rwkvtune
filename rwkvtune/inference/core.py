@@ -65,8 +65,16 @@ class TokenSampler:
         
         # Ban tokens beyond vocabulary range
         max_valid_token_id = getattr(TokenSampler, '_max_valid_token_id', None)
-        if max_valid_token_id is not None and max_valid_token_id + 1 < len(logits):
-            logits[max_valid_token_id + 1:] = float('-inf')
+        if max_valid_token_id is not None:
+            if max_valid_token_id + 1 < len(logits):
+                logits[max_valid_token_id + 1:] = float('-inf')
+            elif max_valid_token_id >= len(logits):
+                # This should not happen if tokenizer and model vocab_size match
+                import warnings
+                warnings.warn(
+                    f"TokenSampler: max_valid_token_id ({max_valid_token_id}) >= logits size ({len(logits)}). "
+                    f"This may indicate a mismatch between tokenizer vocab and model vocab_size."
+                )
         
         # Greedy sampling: return argmax when temperature=0
         if temperature == 0 or temperature < 1e-6:
@@ -161,8 +169,16 @@ class TokenSampler:
         
         # Ban tokens beyond vocabulary range
         max_valid_token_id = getattr(TokenSampler, '_max_valid_token_id', None)
-        if max_valid_token_id is not None and max_valid_token_id + 1 < embedding_size:
-            logits_batch[:, max_valid_token_id + 1:] = float('-inf')
+        if max_valid_token_id is not None:
+            if max_valid_token_id + 1 < embedding_size:
+                logits_batch[:, max_valid_token_id + 1:] = float('-inf')
+            elif max_valid_token_id >= embedding_size:
+                # This should not happen if tokenizer and model vocab_size match
+                import warnings
+                warnings.warn(
+                    f"TokenSampler: max_valid_token_id ({max_valid_token_id}) >= logits size ({embedding_size}). "
+                    f"This may indicate a mismatch between tokenizer vocab and model vocab_size."
+                )
         
         # Greedy sampling: return argmax when temperature=0
         if temperature == 0 or temperature < 1e-6:

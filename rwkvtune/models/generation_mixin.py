@@ -128,6 +128,23 @@ class GenerationMixin:
             input_ids = input_ids.repeat_interleave(num_return_sequences, dim=0)
             batch_size = batch_size * num_return_sequences
         
+        # Helper: apply repetition penalty (same semantics as GRPOBatchGenerator)
+        def _apply_repetition_penalty(
+            logits: torch.Tensor,
+            token_ids_per_row,
+            penalty: float,
+        ):
+            if penalty == 1.0 or penalty <= 0:
+                return
+            vocab_size = logits.shape[-1]
+            for i in range(logits.shape[0]):
+                for tid in token_ids_per_row[i]:
+                    if 0 <= tid < vocab_size:
+                        if logits[i, tid].item() > 0:
+                            logits[i, tid] = logits[i, tid] / penalty
+                        else:
+                            logits[i, tid] = logits[i, tid] * penalty
+
         # Naive inference loop
         with torch.no_grad():
             logits, states = self.forward_with_state(input_ids, states=initial_states)
@@ -138,6 +155,15 @@ class GenerationMixin:
         
         # Autoregressive generation loop
         for step in range(actual_max_new_tokens):
+            # Apply repetition penalty based on history (excluding current token to sample)
+            if repetition_penalty is not None and repetition_penalty != 1.0 and repetition_penalty > 0:
+                # token history per batch row: all tokens generated so far (input + previous outputs)
+                token_ids_per_row = [
+                    output_ids[i].tolist()
+                    for i in range(batch_size)
+                ]
+                _apply_repetition_penalty(next_token_logits, token_ids_per_row, repetition_penalty)
+            
             # Apply temperature
             if temperature > 0 and temperature != 1.0:
                 next_token_logits = next_token_logits / temperature

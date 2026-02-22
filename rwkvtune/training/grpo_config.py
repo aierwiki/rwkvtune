@@ -39,12 +39,16 @@ class GRPOConfig:
     temperature: float = 1.0  # Sampling temperature
     top_p: float = 1.0  # Nucleus sampling
     top_k: int = 0  # Top-k sampling (0 = disabled)
+    repetition_penalty: float = 1.0  # Penalize repeated tokens (>1 to suppress repetition, 1 = off)
 
     # ========== Reward Configuration ==========
     reward_weights: Optional[List[float]] = None  # Multi-reward function weights
 
     # ========== Advantage Calculation ==========
     scale_rewards: str = "group"  # 'group', 'batch', 'none'
+    advantage_clip: Optional[float] = None  # Clamp advantages to [-clip, +clip]; None = disabled
+    low_reward_threshold: Optional[float] = None  # Groups with max_reward < threshold get suppressed advantages
+    low_reward_scale: float = 0.01  # Advantage multiplier for low-quality groups
 
     # ========== Loss Function ==========
     loss_type: str = "dapo"  # 'dapo', 'dr_grpo', 'bnpo', 'grpo'

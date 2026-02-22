@@ -71,8 +71,6 @@ set -e
 # Model path (required)
 MODEL_PATH="${MODEL_PATH:-models/rwkv7-g1d-0.1b}"
 
-# MODEL_PATH="${MODEL_PATH:-/nlp/yubin.tang/models/rwkv7_custom/rwkv7-g1b-2.9b-20251205-ctx8192-official}"
-
 # Data file path
 DATA_FILE="${DATA_FILE:-data/sharegpt_sample_100.jsonl}"
 

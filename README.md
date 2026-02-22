@@ -38,7 +38,7 @@ pip install rwkvtune
 ### From Source
 
 ```bash
-git clone https://github.com/rwkv-community/rwkvtune.git
+git clone https://github.com/aierwiki/rwkvtune.git
 cd rwkvtune
 pip install -e .
 ```
@@ -291,7 +291,7 @@ If you use RWKVTune in your research, please cite:
 @software{rwkvtune,
   title = {RWKVTune: RWKV Model Training Toolkit},
   year = {2024},
-  url = {https://github.com/rwkv-community/rwkvtune}
+  url = {https://github.com/aierwiki/rwkvtune}
 }
 ```
 

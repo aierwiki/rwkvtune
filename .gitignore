@@ -157,3 +157,5 @@ runs/
 nohup.out
 examples/models/
 examples/output_sft/
+examples/output_grpo/
+examples/nohup_grpo.out

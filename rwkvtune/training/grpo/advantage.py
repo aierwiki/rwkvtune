@@ -17,7 +17,10 @@ class AdvantageCalculator:
     computing relative advantages within each group.
     """
 
-    def __init__(self, scale_rewards: str = 'group', num_generations: int = 8):
+    def __init__(self, scale_rewards: str = 'group', num_generations: int = 8,
+                 advantage_clip: Optional[float] = None,
+                 low_reward_threshold: Optional[float] = None,
+                 low_reward_scale: float = 0.01):
         """
         Args:
             scale_rewards: Reward scaling method
@@ -25,11 +28,25 @@ class AdvantageCalculator:
                 - 'batch': Batch-level normalization
                 - 'none': No normalization
             num_generations: Number of generations per prompt (G)
+            advantage_clip: If set, clamp advantages to [-clip, +clip] after
+                standardization.  Prevents extreme gradient magnitudes caused
+                by near-zero group std.  None = disabled (default).
+                Recommended value: 5.0~10.0.
+            low_reward_threshold: If set, groups whose max reward is below this
+                threshold will have their advantages scaled down by
+                ``low_reward_scale``, effectively suppressing gradient updates
+                from low-quality rollout groups.  None = disabled (default).
+            low_reward_scale: Multiplier applied to advantages of groups that
+                fall below ``low_reward_threshold``.  Default 0.01 makes the
+                gradient contribution negligible without introducing NaN.
         """
         assert scale_rewards in ['group', 'batch', 'none'], \
             f"scale_rewards must be one of ['group', 'batch', 'none'], got {scale_rewards}"
         self.scale_rewards = scale_rewards
         self.G = num_generations
+        self.advantage_clip = advantage_clip
+        self.low_reward_threshold = low_reward_threshold
+        self.low_reward_scale = low_reward_scale
 
     def compute_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
         """
@@ -76,6 +93,11 @@ class AdvantageCalculator:
 
         Core idea: For multiple completions of the same prompt, compute advantages
         relative to the group mean. This avoids scale differences between prompts.
+
+        When ``low_reward_threshold`` is set, groups where **all** completions
+        scored poorly (max reward < threshold) get their advantages scaled down
+        to near-zero so that they contribute almost no gradient, preventing the
+        model from fitting to noise among uniformly bad samples.
         """
         # Group-wise mean [B, G] -> [B, 1]
         mean_r = rewards_matrix.mean(dim=1, keepdim=True)
@@ -92,6 +114,32 @@ class AdvantageCalculator:
         # Standardize
         advantages = advantages / std_r
 
+        # Clip extreme advantages (e.g. from near-zero std groups)
+        if self.advantage_clip is not None:
+            pre_clip_abs_max = advantages.abs().max().item()
+            advantages = advantages.clamp(-self.advantage_clip, self.advantage_clip)
+            if pre_clip_abs_max > self.advantage_clip:
+                print(
+                    f"[ADVANTAGE] Clipped advantages: "
+                    f"abs_max {pre_clip_abs_max:.2f} -> {self.advantage_clip:.1f}"
+                )
+
+        # Suppress advantages for groups where all completions are poor
+        if self.low_reward_threshold is not None:
+            max_r = rewards_matrix.max(dim=1, keepdim=True).values  # [B, 1]
+            low_quality_mask = (max_r < self.low_reward_threshold)  # [B, 1] bool
+            if low_quality_mask.any():
+                n_suppressed = low_quality_mask.sum().item()
+                print(
+                    f"[ADVANTAGE] Suppressing {n_suppressed}/{rewards_matrix.shape[0]} groups "
+                    f"(max_reward < {self.low_reward_threshold}, scale={self.low_reward_scale})"
+                )
+            advantages = torch.where(
+                low_quality_mask.expand_as(advantages),
+                advantages * self.low_reward_scale,
+                advantages,
+            )
+
         return advantages
 
     def _compute_batch_advantages(self, rewards_matrix: torch.Tensor) -> torch.Tensor:
@@ -107,6 +155,9 @@ class AdvantageCalculator:
         std_r = torch.clamp(std_r, min=1e-8)
 
         advantages = (rewards_matrix - mean_r) / std_r
+
+        if self.advantage_clip is not None:
+            advantages = advantages.clamp(-self.advantage_clip, self.advantage_clip)
 
         return advantages
 
