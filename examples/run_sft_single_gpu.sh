@@ -71,8 +71,8 @@ set -e
 # Model path (required)
 MODEL_PATH="${MODEL_PATH:-models/rwkv7-g1d-0.1b}"
 
-# Data file path
-DATA_FILE="${DATA_FILE:-data/sharegpt_sample_100.jsonl}"
+# Data file path (download from ModelScope: https://modelscope.cn/datasets/aierwiki/sharegpt_roleplay_sample_100)
+DATA_FILE="${DATA_FILE:-data/sharegpt_roleplay_sample_100.jsonl}"
 
 # Output directory
 OUTPUT_DIR="${OUTPUT_DIR:-output_sft}"

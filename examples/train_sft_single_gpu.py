@@ -53,7 +53,12 @@ def load_sharegpt_data(data_file: str) -> List[Dict[str, Any]]:
     return data
 
 
-def format_conversation(conversations: List[Dict], tokenizer) -> Dict[str, List[int]]:
+def format_conversation(
+    conversations: List[Dict],
+    tokenizer,
+    last_reply_only: bool = False,
+    eos_token_id: "Optional[int]" = None,
+) -> Dict[str, List[int]]:
     """
     Convert ShareGPT conversation format to input_ids and labels for training.
     
@@ -85,8 +90,15 @@ def format_conversation(conversations: List[Dict], tokenizer) -> Dict[str, List[
     # Step 1: Build complete token sequence with role markers
     all_tokens = []
     token_roles = []  # 'mask' or 'gpt', marks which positions compute loss
-    
-    for turn in conversations:
+
+    # Optionally only train on the last assistant reply
+    assistant_indices = [
+        idx for idx, turn in enumerate(conversations)
+        if turn.get('from', '').lower() in ('gpt', 'assistant')
+    ]
+    last_assistant_idx = assistant_indices[-1] if assistant_indices else None
+
+    for idx, turn in enumerate(conversations):
         role = turn.get('from', '').lower()
         content = turn.get('value', '')
         
@@ -98,18 +110,39 @@ def format_conversation(conversations: List[Dict], tokenizer) -> Dict[str, List[
             token_roles.extend(['mask'] * len(tokens))
             
         elif role in ('human', 'user'):
-            # User input (includes Assistant: and think prefix) - no loss computation
-            text = f"User: {content}\n\nAssistant:{THINK_PREFIX}"
-            tokens = tokenizer.encode(text)
+            # User input - no loss computation,但我们显式在结尾追加 eos_token_id
+            user_text = f"User: {content}"
+            user_tokens = tokenizer.encode(user_text)
+            if eos_token_id is not None:
+                user_tokens.append(eos_token_id)
+            else:
+                # 回退到原有行为：使用文本形式的换行
+                user_tokens.extend(tokenizer.encode("\n\n"))
+
+            # 后续的 Assistant: 和 THINK_PREFIX 仍然视作 prompt 部分，不计入 loss
+            # 这里不再额外加 "\n\n"，避免在 261 后面再叠加一对换行。
+            suffix_text = f"Assistant:{THINK_PREFIX}"
+            suffix_tokens = tokenizer.encode(suffix_text)
+
+            tokens = user_tokens + suffix_tokens
             all_tokens.extend(tokens)
             token_roles.extend(['mask'] * len(tokens))
             
         elif role in ('gpt', 'assistant'):
             # Assistant reply - compute loss
-            text = f"{content}\n\n"
-            tokens = tokenizer.encode(text)
-            all_tokens.extend(tokens)
-            token_roles.extend(['gpt'] * len(tokens))
+            # If last_reply_only=True, only the final assistant turn contributes to loss.
+            is_target_reply = (not last_reply_only) or (idx == last_assistant_idx)
+
+            # 显式在每条 assistant 回复结尾追加 eos_token_id
+            reply_tokens = tokenizer.encode(content)
+            if eos_token_id is not None:
+                reply_tokens.append(eos_token_id)
+            else:
+                # 回退：保持原有行为，用文本形式的 "\n\n"
+                reply_tokens.extend(tokenizer.encode("\n\n"))
+
+            all_tokens.extend(reply_tokens)
+            token_roles.extend([('gpt' if is_target_reply else 'mask')] * len(reply_tokens))
     
     # Step 2: Apply shift operation (consistent with rwkvtune convention)
     # input_ids: used to predict next token
@@ -137,9 +170,11 @@ def format_conversation(conversations: List[Dict], tokenizer) -> Dict[str, List[
 
 
 def prepare_dataset(
-    data: List[Dict], 
-    tokenizer, 
-    max_length: int = 2048
+    data: List[Dict],
+    tokenizer,
+    max_length: int = 2048,
+    last_reply_only: bool = False,
+    eos_token_id: "Optional[int]" = None,
 ) -> Dataset:
     """
     Prepare training dataset.
@@ -161,7 +196,12 @@ def prepare_dataset(
             skipped += 1
             continue
         
-        sample = format_conversation(conversations, tokenizer)
+        sample = format_conversation(
+            conversations,
+            tokenizer,
+            last_reply_only=last_reply_only,
+            eos_token_id=eos_token_id,
+        )
         
         # Truncate to max length
         if len(sample['input_ids']) > max_length:
@@ -223,23 +263,11 @@ def print_first_sample(dataset: Dataset, tokenizer) -> None:
     print(label_text)
     print("-" * 40)
     
-    print(f"\n[Token-level alignment] (first 50 tokens)")
-    print("-" * 70)
-    print(f"{'Pos':<6} {'input_id':<10} {'label':<10} {'input text':<20} {'prediction target'}")
-    print("-" * 70)
-    print("Note: input[i] predicts label[i], i.e., the next token")
-    print("-" * 70)
-    for i in range(min(50, len(input_ids))):
-        input_text = tokenizer.decode([input_ids[i]]).replace('\n', '\\n').replace('\t', '\\t')
-        if labels[i] != -100:
-            label_text = tokenizer.decode([labels[i]]).replace('\n', '\\n').replace('\t', '\\t')
-            label_str = f"{labels[i]} ({repr(label_text)})"
-        else:
-            label_str = "-100 (masked)"
-        print(f"{i:<6} {input_ids[i]:<10} {labels[i] if labels[i] != -100 else -100:<10} {repr(input_text):<20} {label_str if labels[i] != -100 else 'no loss'}")
-    if len(input_ids) > 50:
-        print(f"... omitting {len(input_ids) - 50} remaining tokens")
-    print("="*70 + "\n")
+    print(f"\n[input_ids] token list ({len(input_ids)} tokens):")
+    print(input_ids)
+    print(f"\n[labels] token list ({len(labels)} tokens):")
+    print(labels)
+    print("="*60 + "\n")
 
 
 def main():
@@ -254,6 +282,11 @@ def main():
                         help="Training data file path (ShareGPT JSONL format)")
     parser.add_argument("--ctx_len", type=int, default=2048,
                         help="Context length")
+    parser.add_argument(
+        "--last_reply_only",
+        action="store_true",
+        help="Only compute loss on the last assistant reply in each conversation.",
+    )
     
     # Training parameters
     parser.add_argument("--micro_bsz", type=int, default=2,
@@ -312,6 +345,9 @@ def main():
     
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     print(f"Tokenizer loaded, vocab size: {tokenizer.vocab_size}")
+
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    print(f"EOS token id: {eos_token_id}")
     
     # ========== 2. Load and Process Data ==========
     print("\n" + "="*60)
@@ -319,7 +355,13 @@ def main():
     print("="*60)
     
     raw_data = load_sharegpt_data(args.data_file)
-    dataset = prepare_dataset(raw_data, tokenizer, max_length=args.ctx_len)
+    dataset = prepare_dataset(
+        raw_data,
+        tokenizer,
+        max_length=args.ctx_len,
+        last_reply_only=args.last_reply_only,
+        eos_token_id=eos_token_id,
+    )
     
     print_first_sample(dataset, tokenizer)
     

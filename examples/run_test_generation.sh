@@ -12,20 +12,23 @@ set -e
 # ==================== Configuration ====================
 
 # Model path (merged model)
-MODEL_PATH="./output_sft/rwkv7-epoch3"
+MODEL_PATH="./output_sft_grpo/rwkv7-epoch3"
 # MODEL_PATH="models/rwkv7-g1d-0.1b"
 
 # LoRA config (USE_LORA=1 for unmerged LoRA model)
 USE_LORA=1
-BASE_MODEL="models/rwkv7-g1d-0.1b"
-LORA_PATH="./output_sft/rwkv7-epoch3"
+BASE_MODEL="./output_sft_grpo/rwkv7-epoch3"
+LORA_PATH="./output_grpo/rwkv7-batch1728"
 
-# Test data
-DATA_FILE="data/sharegpt_sample_100.jsonl"
+# Test data (download from ModelScope: https://modelscope.cn/datasets/aierwiki/sharegpt_roleplay_sample_100)
+DATA_FILE="data/sharegpt_roleplay_sample_100.jsonl"
 NUM_SAMPLES=3
 
+# Output JSON file for full prompts & generations (overwritten each run)
+OUTPUT_JSON="test_generation_full_log.json"
+
 # Generation parameters
-MAX_NEW_TOKENS=256
+MAX_NEW_TOKENS=2048
 TEMPERATURE=0.8
 TOP_P=0.9
 EOS_TOKEN_ID=261  # RWKV default EOS is \n\n, token ID 261
@@ -52,6 +55,7 @@ echo "  Max generation:  ${MAX_NEW_TOKENS} tokens"
 echo "  Temperature:     ${TEMPERATURE}"
 echo "  Top-p:           ${TOP_P}"
 echo "  EOS Token:       ${EOS_TOKEN_ID}"
+echo "  Output JSON:     ${OUTPUT_JSON}"
 echo "  GPU device:      ${CUDA_DEVICE}"
 echo ""
 
@@ -97,7 +101,8 @@ if [ "${USE_LORA}" = "1" ]; then
         --max_new_tokens "${MAX_NEW_TOKENS}" \
         --temperature "${TEMPERATURE}" \
         --top_p "${TOP_P}" \
-        --eos_token_id "${EOS_TOKEN_ID}"
+        --eos_token_id "${EOS_TOKEN_ID}" \
+        --output_json "${OUTPUT_JSON}"
 else
     python test_generation.py \
         --model_path "${MODEL_PATH}" \
@@ -106,7 +111,8 @@ else
         --max_new_tokens "${MAX_NEW_TOKENS}" \
         --temperature "${TEMPERATURE}" \
         --top_p "${TOP_P}" \
-        --eos_token_id "${EOS_TOKEN_ID}"
+        --eos_token_id "${EOS_TOKEN_ID}" \
+        --output_json "${OUTPUT_JSON}"
 fi
 
 echo ""

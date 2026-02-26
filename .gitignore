@@ -159,3 +159,6 @@ examples/models/
 examples/output_sft/
 examples/output_grpo/
 examples/nohup_grpo.out
+examples/output_sft_grpo/
+examples/upload_datasets_to_modelscope.py
+examples/test_generation_full_log.json

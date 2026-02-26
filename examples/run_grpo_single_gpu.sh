@@ -2,36 +2,22 @@
 #
 # RWKVTune GRPO Single GPU Training Script
 #
-# This script runs GRPO (Group Relative Policy Optimization) training
-# on a small ShareGPT-style dataset using a RWKV7 base model and LoRA.
-#
-# Data:
-#   - examples/data/sharegpt_sample_100.jsonl
-#
-# Base model:
-#   - models/rwkv7-g1d-0.1b
-#     (converted from raw .pth via rwkvtune-create-hub)
-#
-# Usage:
-#   chmod +x run_grpo_single_gpu.sh
-#   ./run_grpo_single_gpu.sh
-#
 
 set -e
 
 # ==================== Configuration ====================
 
-# Model path (hub-style directory created by rwkvtune-create-hub)
-MODEL_PATH="models/rwkv7-g1a3-2.9b-20251103-ctx8192"
+# Model path (hub-style directory created by rwkvtune-create-hub https://modelscope.cn/models/aierwiki/rwkv7-g1a3-2.9b-20251103-ctx8192)
+MODEL_PATH="./output_sft_grpo/rwkv7-epoch3"
 
-# Data file (ShareGPT-style JSONL)
+# Data file (ShareGPT-style JSONL; sample data: download from ModelScope https://modelscope.cn/datasets/aierwiki/sharegpt_roleplay_sample_100, put in data/ and rename if needed)
 DATA_FILE="data/sharegpt_sample_100.jsonl"
 
 # Output directory for GRPO training
 OUTPUT_DIR="output_grpo"
 
 # Data: max samples to use (0 = use all)
-MAX_SAMPLES=16
+MAX_SAMPLES=100
 
 # Checkpoint saving: save model checkpoint every N batches (0 = disabled, only save at epoch end)
 SAVE_EVERY_N_BATCHES=64
@@ -41,8 +27,8 @@ SAVE_ROLLOUT_STEPS=16
 # Optional: directory for rollout .jsonl (default: ${OUTPUT_DIR}/rollouts)
 # SAVE_ROLLOUT_PATH=""
 
-# Reward weights: comma-separated (has_think, think_len, reply_len, actions_style, similarity, format_clean). Empty = default
-# REWARD_WEIGHTS="1.0,0.5,0.3,0.8,0.6,0.8"
+# Reward weights: comma-separated (has_think, think_len, reply_len, actions_style, similarity, format_clean, eos_ending). Empty = default
+# REWARD_WEIGHTS="1.0,0.5,0.6,0.8,0.5,0.8,1.2"
 
 # Advantage clipping: clamp advantages to [-clip, +clip] after normalization.
 # Prevents extreme gradients from near-zero std groups. Set to empty to disable.
@@ -57,15 +43,14 @@ LOW_REWARD_SCALE=0.01
 MICRO_BSZ=1              # Prompts per GPU batch
 NUM_GENERATIONS=16        # Completions per prompt (G)
 STEPS_PER_GENERATION=16   # Training steps per generation
-EPOCH_COUNT=1            # Number of GRPO epochs
+EPOCH_COUNT=5            # Number of GRPO epochs
 
 # Generation parameters
 MAX_PROMPT_LENGTH=2048      # Max prompt length (tokens)
-MAX_COMPLETION_LENGTH=512  # Max completion length (tokens)
-# 更保守一点，减少胡说和复读机
-TEMPERATURE=0.5
-TOP_P=0.85
-REPETITION_PENALTY=1.2      # >1 suppresses repetition (1=off)
+MAX_COMPLETION_LENGTH=1536  # Max completion length (tokens, think 500-1000 + reply ~30)
+TEMPERATURE=1.0
+TOP_P=0.95
+REPETITION_PENALTY=1.0
 
 # Optimization parameters
 LR_INIT=1e-6
@@ -82,6 +67,11 @@ CUDA_DEVICE=6
 LORA_R=64
 LORA_ALPHA=128
 LORA_DROPOUT=0.0
+
+# KL penalty: constrain policy from drifting too far from the reference model.
+# With LoRA, the reference is computed by disabling the adapter (no extra VRAM).
+# Typical range: 0.01 ~ 0.1. Set to empty or 0 to disable.
+BETA=0.04
 
 # Logging
 REPORT_TO="swanlab"      # "" / "swanlab" / "wandb"
@@ -116,6 +106,7 @@ echo "  use_lora:            true"
 echo "  lora_r:              ${LORA_R}"
 echo "  lora_alpha:          ${LORA_ALPHA}"
 echo "  lora_dropout:        ${LORA_DROPOUT}"
+echo "  beta (KL penalty):   ${BETA:-0}"
 echo "  logging:             ${REPORT_TO:-none}"
 echo "  run_name:            ${RUN_NAME}"
 echo "  GPU device:          ${CUDA_DEVICE}"
@@ -186,6 +177,9 @@ if [ -n "${ADVANTAGE_CLIP}" ]; then
 fi
 if [ -n "${LOW_REWARD_THRESHOLD}" ]; then
   CMD="${CMD} --low_reward_threshold ${LOW_REWARD_THRESHOLD} --low_reward_scale ${LOW_REWARD_SCALE}"
+fi
+if [ -n "${BETA}" ] && [ "${BETA}" != "0" ]; then
+  CMD="${CMD} --beta ${BETA}"
 fi
 if [ -n "${REPORT_TO}" ]; then
   CMD="${CMD} --report_to ${REPORT_TO}"

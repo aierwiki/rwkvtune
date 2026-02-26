@@ -24,7 +24,7 @@ GRPO training idea:
       generated text based on:
         * Correct <think>...</think> structure
         * Separation of actions (inside * ... *) and speech (outside *)
-        * Length of thinking part (≈100–300 tokens)
+        * Length of thinking part (≈500–1000 tokens)
         * Length of reply part (≈10–30 tokens)
         * Approximate similarity to the reference answer
 
@@ -46,7 +46,6 @@ import os
 import re
 from typing import Any, Dict, List, Tuple
 
-import torch
 from datasets import Dataset
 
 from rwkvtune import AutoTokenizer
@@ -171,9 +170,6 @@ def build_grpo_dataset_from_sharegpt(
 
         # For each pair k, build prompt that ends with "Assistant: <think"（与 infer_with_rwkv_pip 一致）
         for turn_idx, (user_text, ai_text) in enumerate(pairs):
-            if turn_idx > 0:
-                pass
-
             history_parts_copy = list(history_parts)
             history_parts_copy.append(f"User: {user_text}\n\n")
             history_parts_copy.append("Assistant: <think")
@@ -218,115 +214,6 @@ def build_grpo_dataset_from_sharegpt(
 
 
 THINK_CLOSE = "</think>"
-
-# =====================================================================
-# Completion post-processing: truncate at next-turn delimiters
-# =====================================================================
-# During GRPO rollout the model sometimes does not emit EOS (\n\n) at
-# the end of its reply and instead continues to generate the next
-# turn's "System:" or "User:" header.  This postprocessor truncates
-# each completion at the first occurrence of such a delimiter so that
-# reward functions only see the actual reply and training loss is
-# computed on clean tokens.
-#
-# This function serves as the reference implementation of a
-# ``completion_postprocess_fn`` hook.  You can write your own as long
-# as it follows the same input / output contract documented below.
-# =====================================================================
-
-# Substrings that signal "the model has leaked into the next turn"
-_STOP_SUBSTRINGS = ("\nSystem:", "?System:", "\nUser:", "System:", "\n\nUser:", "\n\nSystem:", "?User:")
-
-# RWKV EOS: "\n\n" is a single token (id=261 by default)
-_EOS_TEXT = "\n\n"
-
-
-def truncate_at_stop_postprocessor(
-    prompts: List[str],
-    completions: List[str],
-    completion_ids: "torch.Tensor",
-    masks: "torch.Tensor",
-    tokenizer,
-    **extra_fields,
-) -> Dict[str, Any]:
-    """Truncate completions at the first next-turn delimiter.
-
-    This is a ``completion_postprocess_fn`` hook — called after rollout
-    generation and before reward computation.
-
-    Input contract (provided by the framework)
-    -------------------------------------------
-    prompts          : List[str]        – [B*G] prompt texts (read-only).
-    completions      : List[str]        – [B*G] generated completion texts.
-    completion_ids   : torch.Tensor     – [B*G, C] int token IDs produced by
-                                          the model during rollout, 0-padded.
-    masks            : torch.Tensor     – [B*G, C] bool mask where True marks
-                                          a valid (generated) token position.
-    tokenizer                           – tokenizer with ``encode()`` / ``decode()``.
-    **extra_fields                      – any additional dataset columns
-                                          (e.g. ``ground_truth_answer``).
-
-    Output contract (must be returned)
-    ----------------------------------
-    A ``dict`` with exactly three keys::
-
-        {
-            'completions':    List[str],         # [B*G]  modified texts
-            'completion_ids': torch.Tensor,      # [B*G, C] same shape & device
-            'masks':          torch.Tensor,      # [B*G, C] same shape & device
-        }
-
-    Processing steps:
-      1. Truncate each completion at the earliest next-turn delimiter
-         (e.g. "System:", "User:").
-      2. Ensure every completion ends with ``\\n\\n`` (RWKV EOS).
-      3. Re-encode the final text to produce new ``completion_ids``,
-         and rebuild ``masks`` accordingly.  The returned tensors keep
-         the same ``[B*G, C]`` shape — sequences shorter than *C* are
-         0-padded, sequences longer than *C* are truncated to *C*.
-    """
-    B_G, C = completion_ids.shape
-    device = completion_ids.device
-
-    # --- Step 1: text-level processing ---
-    new_completions: List[str] = []
-    for text in completions:
-        if not text:
-            new_completions.append(text)
-            continue
-
-        # Truncate at earliest stop substring
-        cut = len(text)
-        for stop in _STOP_SUBSTRINGS:
-            idx = text.find(stop)
-            if idx != -1 and idx < cut:
-                cut = idx
-        if cut < len(text):
-            text = text[:cut].rstrip()
-
-        # Ensure ends with \n\n
-        if text and not text.endswith(_EOS_TEXT):
-            text = text + _EOS_TEXT
-
-        new_completions.append(text)
-
-    # --- Step 2: re-encode all completions → new completion_ids & masks ---
-    new_ids = torch.zeros(B_G, C, dtype=completion_ids.dtype, device=device)
-    new_masks = torch.zeros(B_G, C, dtype=masks.dtype, device=device)
-
-    for i, text in enumerate(new_completions):
-        if not text:
-            continue
-        token_ids = tokenizer.encode(text)
-        n = min(len(token_ids), C)
-        new_ids[i, :n] = torch.tensor(token_ids[:n], dtype=completion_ids.dtype)
-        new_masks[i, :n] = True
-
-    return {
-        "completions": new_completions,
-        "completion_ids": new_ids,
-        "masks": new_masks,
-    }
 
 
 def _range_score(
@@ -399,10 +286,11 @@ def build_think_reply_reward_fns(tokenizer):
                 continue
             think_text, _ = _parse_think_reply(c)
             n = _token_count(think_text)
-            out.append(_range_score(n, soft_min=60, target_min=100, target_max=300, soft_max=400))
+            out.append(_range_score(n, soft_min=300, target_min=500, target_max=1000, soft_max=1200))
         return out
 
     # 3) Reply length in target range (requires </think> structure)
+    #    Graduated penalty: over 50 tokens gets -0.5, over 100 gets -1.0.
     def reward_reply_len(prompts: List[str], completions: List[str], **extra_fields) -> List[float]:
         out = []
         for c in completions:
@@ -411,7 +299,12 @@ def build_think_reply_reward_fns(tokenizer):
                 continue
             _, reply_text = _parse_think_reply(c)
             n = _token_count(reply_text)
-            out.append(_range_score(n, soft_min=5, target_min=10, target_max=30, soft_max=40))
+            if n > 100:
+                out.append(-1.0)
+            elif n > 50:
+                out.append(-0.5)
+            else:
+                out.append(_range_score(n, soft_min=5, target_min=10, target_max=30, soft_max=50))
         return out
 
     # 4) Actions in *...* and speech outside; asterisks must be paired
@@ -492,6 +385,19 @@ def build_think_reply_reward_fns(tokenizer):
                 out.append(-1.0)
         return out
 
+    # 7) Proper EOS: ends with \n\n → +1.0, otherwise → -0.5
+    def reward_eos_ending(prompts: List[str], completions: List[str], **extra_fields) -> List[float]:
+        out = []
+        for c in completions:
+            if c is None:
+                out.append(-1.0)
+                continue
+            if c.rstrip(" ").endswith("\n\n"):
+                out.append(1.0)
+            else:
+                out.append(-0.5)
+        return out
+
     reward_fns = [
         reward_has_think,
         reward_think_len,
@@ -499,8 +405,9 @@ def build_think_reply_reward_fns(tokenizer):
         reward_actions_style,
         reward_similarity,
         reward_format_clean,
+        reward_eos_ending,
     ]
-    default_weights = [1.0, 0.5, 0.3, 0.8, 0.6, 0.8]
+    default_weights = [1.0, 0.5, 0.6, 0.8, 0.5, 0.8, 1.2]
     return reward_fns, default_weights
 
 
@@ -585,13 +492,21 @@ def parse_args() -> argparse.Namespace:
         help="Run name for logging / experiment tracking",
     )
 
-    # Reward weights (one per reward function: has_think, think_len, reply_len, actions_style, similarity)
+    # Reward weights (one per reward function)
     parser.add_argument(
         "--reward_weights",
         type=str,
         default="",
-        help="Comma-separated weights for reward functions (default: 1.0,0.5,0.3,0.8,0.6,0.8). "
-             "Order: has_think, think_len, reply_len, actions_style, similarity, format_clean.",
+        help="Comma-separated weights for reward functions (default: 1.0,0.5,0.6,0.8,0.5,0.8,1.2). "
+             "Order: has_think, think_len, reply_len, actions_style, similarity, format_clean, eos_ending.",
+    )
+
+    # KL penalty
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.0,
+        help="KL divergence coefficient to constrain policy drift from reference model (0 = disabled, recommended: 0.01~0.1).",
     )
 
     # Advantage clipping and low-quality group suppression
@@ -697,7 +612,7 @@ def main():
         if len(reward_weights) != len(reward_fns):
             raise ValueError(
                 f"reward_weights has {len(reward_weights)} values but there are {len(reward_fns)} reward functions. "
-                f"Expected: has_think, think_len, reply_len, actions_style, similarity"
+                f"Expected: has_think, think_len, reply_len, actions_style, similarity, format_clean, eos_ending"
             )
     else:
         reward_weights = default_weights
@@ -728,10 +643,12 @@ def main():
         save_total_limit=2,
         report_to=(args.report_to or None),
         run_name=args.run_name,
+        log_steps=1,
         use_lora=True,
         reward_weights=reward_weights,
         save_rollout_steps=args.save_rollout_steps,
         save_rollout_path=(args.save_rollout_path or None),
+        beta=args.beta,
         advantage_clip=args.advantage_clip,
         low_reward_threshold=args.low_reward_threshold,
         low_reward_scale=args.low_reward_scale,
@@ -746,10 +663,6 @@ def main():
     )
 
     # 7. Create GRPO trainer
-    # The truncate_at_stop_postprocessor is an optional hook called after rollout
-    # generation and before reward computation.  It truncates completions at
-    # next-turn delimiters ("System:", "User:") to prevent the model from
-    # "leaking" into the next turn.  Pass None to disable post-processing.
     trainer = GRPOTrainer(
         model=args.model_path,
         reward_funcs=reward_fns,
@@ -757,7 +670,6 @@ def main():
         train_dataset=dataset,
         processing_class=tokenizer,
         peft_config=peft_config,
-        completion_postprocess_fn=truncate_at_stop_postprocessor,
     )
 
     # 8. Start training

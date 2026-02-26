@@ -128,6 +128,12 @@ def main():
                         help="EOS token ID (RWKV default 261 = \\n\\n)")
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device (cuda/cpu)")
+    parser.add_argument(
+        "--output_json",
+        type=str,
+        default=None,
+        help="Optional JSON file to save full prompts & generations (list of records)",
+    )
     
     args = parser.parse_args()
     
@@ -158,11 +164,14 @@ def main():
     
     model.eval()
     print(f"Model loaded on {args.device}")
-    
+
     # 2. Load test samples
     print(f"\nLoading test samples...")
     samples = load_test_samples(args.data_file, args.num_samples)
     print(f"Loaded {len(samples)} test samples")
+
+    # For optional JSON saving
+    results = []
     
     # 3. Test generation
     print("\n" + "=" * 60)
@@ -203,11 +212,35 @@ def main():
         output_ids = output_ids[0].tolist()
         generated_ids = output_ids[len(input_ids):]
         generated_text = tokenizer.decode(generated_ids)
+
+        # 额外保险：在文本层面遇到第一个 "\n\n" 就截断
+        eos_text = "\n\n"
+        cut_pos = generated_text.find(eos_text)
+        if cut_pos != -1:
+            generated_text = generated_text[:cut_pos]
         
         print(f"\nGenerated:\n{generated_text}")
         
         if reference:
             print(f"\nReference (from training data):\n{reference}")
+
+        record = {
+            "index": i,
+            "prompt": prompt,
+            "generated": generated_text,
+        }
+        if reference:
+            record["reference"] = reference
+        results.append(record)
+
+    # 保存为标准 JSON（列表）
+    if args.output_json:
+        out_dir = os.path.dirname(args.output_json)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(args.output_json, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"\nSaved {len(results)} records to JSON file: {args.output_json}")
     
     print("\n" + "=" * 60)
     print("Test Complete!")
