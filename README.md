@@ -1,6 +1,6 @@
 # RWKVTune
 
-A comprehensive training toolkit for RWKV language models, supporting Pre-training, SFT, and GRPO.
+An easy-to-use, extensible training toolkit for RWKV language models. Inspired by HuggingFace [trl](https://github.com/huggingface/trl), RWKVTune brings the same familiar Trainer-style API to the RWKV ecosystem -- if you've used `trl`, you'll feel right at home.
 
 [![PyPI version](https://badge.fury.io/py/rwkvtune.svg)](https://badge.fury.io/py/rwkvtune)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -8,9 +8,16 @@ A comprehensive training toolkit for RWKV language models, supporting Pre-traini
 
 > **[中文文档 (Chinese Documentation)](README_zh.md)**
 
+## Why RWKVTune?
+
+- **trl-style API**: Same `Config + Trainer + Dataset` workflow you already know. Define a config, pass a model and dataset to a Trainer, and call `.train()` -- that's it.
+- **Minimal boilerplate**: Go from raw model weights to a trained model in under 20 lines of Python. Shell script wrappers for common workflows are included.
+- **RWKV-native**: Purpose-built for RWKV-7 architecture with optimized inference kernels, chunked prefill, and RWKV-specific LoRA targets.
+- **Full pipeline coverage**: Pre-training, SFT, GRPO (RLHF), LoRA merging, model hub creation, and generation testing -- all in one package.
+
 ## Features
 
-- **Three Training Paradigms**
+- **Three Training Paradigms** (trl-compatible Trainer API)
   - `PretrainTrainer`: Continue pre-training from existing models
   - `SFTTrainer`: Supervised Fine-Tuning for instruction following
   - `GRPOTrainer`: Group Relative Policy Optimization for RLHF

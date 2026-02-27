@@ -1,6 +1,6 @@
 # RWKVTune
 
-RWKV 模型训练工具库 -- 支持预训练、SFT 和 GRPO 三大训练范式。
+RWKV 模型训练工具库 -- 借鉴 HuggingFace [trl](https://github.com/huggingface/trl) 的 Trainer API 设计，为 RWKV 生态提供简洁易用、可扩展的统一训练框架。
 
 [![PyPI version](https://badge.fury.io/py/rwkvtune.svg)](https://badge.fury.io/py/rwkvtune)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -8,9 +8,16 @@ RWKV 模型训练工具库 -- 支持预训练、SFT 和 GRPO 三大训练范式�
 
 > **[English Documentation](README.md)**
 
+## 为什么选择 RWKVTune?
+
+- **trl 风格 API**: 采用与 trl 一致的 `Config + Trainer + Dataset` 工作流。定义配置、传入模型和数据集、调用 `.train()` 即可开始训练，用过 trl 的开发者可以零成本上手。
+- **极简上手**: 不到 20 行 Python 代码即可完成从原始模型到训练完成的全流程。同时提供 Shell 脚本封装，改几个变量就能跑。
+- **RWKV 原生优化**: 专为 RWKV-7 架构设计，内置优化推理内核、分块 Prefill、RWKV 专用 LoRA 目标模块等。
+- **全流程覆盖**: 预训练、SFT、GRPO (RLHF)、LoRA 合并、模型目录创建、生成测试 -- 一个包搞定。
+
 ## 核心特性
 
-- **三大训练范式**
+- **三大训练范式** (trl 风格 Trainer API)
   - `PretrainTrainer`: 继续预训练
   - `SFTTrainer`: 监督微调
   - `GRPOTrainer`: GRPO 强化学习对齐
