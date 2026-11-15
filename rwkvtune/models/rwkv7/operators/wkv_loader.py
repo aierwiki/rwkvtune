@@ -217,12 +217,12 @@ def load_cuda_operator_train(head_size: int = 64) -> Callable:
     """
     global _cuda_operator_train
     
-    if _cuda_operator_train is not None:
-        return _cuda_operator_train
+    if head_size in _cuda_operator_train:
+        return _cuda_operator_train[head_size]
     
     with _load_lock:
-        if _cuda_operator_train is not None:
-            return _cuda_operator_train
+        if head_size in _cuda_operator_train:
+            return _cuda_operator_train[head_size]
             
         import torch
         from torch.utils.cpp_extension import load
