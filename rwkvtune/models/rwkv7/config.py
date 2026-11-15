@@ -66,10 +66,14 @@ class SimpleTrainConfig:
     dim_gate_lora: int = 0
     dim_mv_lora: int = 0
     
+    dim_ffn: int = 0
+
     def __post_init__(self):
         """Post-init processing."""
         self.dim_att = self.n_embd
-        self.dim_ffn = int((self.n_embd * 3.5) // 32 * 32)
+        # 4x matches all released World/G1 checkpoints (official train.py defaults
+        # to 3.5x for brand-new pretraining; set dim_ffn explicitly to override).
+        self.dim_ffn = int(self.dim_ffn) or self.n_embd * 4
         self.head_size_divisor = 8
         self.my_testing = 'x070'
         

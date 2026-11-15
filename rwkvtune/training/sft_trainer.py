@@ -307,7 +307,10 @@ class SFTTrainer:
                 
                 # Derived params
                 self.config.dim_att = self.config.n_embd
-                self.config.dim_ffn = int((self.config.n_embd * 3.5) // 32 * 32)
+                # All released World/G1 checkpoints use a 4x FFN (official train.py
+                # defaults to 3.5x only for brand-new pretraining). Default to 4x so
+                # released checkpoints load; pass dim_ffn explicitly to override.
+                self.config.dim_ffn = self.config.n_embd * 4
                 
                 # ========== 2. Pass training params to model config ==========
                 # Model forward checks these params

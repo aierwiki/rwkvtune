@@ -40,11 +40,17 @@ class RWKV7TimeMix(nn.Module):
         self.layer_id = layer_id
         self.head_size = config.head_size_a
         self.n_head = config.dim_att // self.head_size
-        
+
         C = config.n_embd
         H = self.n_head
         N = self.head_size
-        
+
+        # Official demo asserts dim_att % head_size == 0 (C must equal H * N)
+        assert config.dim_att % self.head_size == 0, (
+            f"dim_att ({config.dim_att}) must be divisible by head_size_a ({self.head_size})")
+        assert C == H * self.head_size, (
+            f"n_embd ({C}) must equal n_head * head_size ({H} * {self.head_size})")
+
         with torch.no_grad():
             ratio_0_to_1 = layer_id / (config.n_layer - 1)
             ratio_1_to_almost0 = 1.0 - (layer_id / config.n_layer)
@@ -294,8 +300,12 @@ class RWKV7ChannelMix(nn.Module):
                 ddd[0, 0, i] = i / config.n_embd
             self.x_k = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0 ** 4))
         
-        self.key = nn.Linear(config.n_embd, config.n_embd * 4, bias=False)
-        self.value = nn.Linear(config.n_embd * 4, config.n_embd, bias=False)
+        # dim_ffn: official train.py defaults to 3.5x for brand-new training, but all
+        # released World/G1 checkpoints use 4x. Honor an explicit config value and
+        # default to 4x so released checkpoints always load.
+        ffn_dim = int(getattr(config, 'dim_ffn', 0) or 0) or config.n_embd * 4
+        self.key = nn.Linear(config.n_embd, ffn_dim, bias=False)
+        self.value = nn.Linear(ffn_dim, config.n_embd, bias=False)
         
         with torch.no_grad():
             self.key.weight.data.uniform_(-0.5 / (config.n_embd ** 0.5), 0.5 / (config.n_embd ** 0.5))
@@ -445,11 +455,17 @@ class RWKV7Model(GenerationMixin, nn.Module):
             logits: [B, T, vocab_size] or [B, logits_to_keep, vocab_size]
         """
         B, T = idx.size()
-        assert T <= self.config.ctx_len, f"Sequence length {T} exceeds max length {self.config.ctx_len}"
-        
+        ctx_len = getattr(self.config, 'ctx_len', None)
+        if ctx_len is not None and T > ctx_len:
+            # Official RWKV RNN/GPT mode can run beyond the trained context with
+            # degraded quality; warn instead of raising.
+            import warnings
+            warnings.warn(f"Sequence length {T} exceeds trained context {ctx_len}; "
+                          f"output quality may degrade.", RuntimeWarning, stacklevel=2)
+
         x = self.emb(idx)
         v_first = torch.empty_like(x)
-        
+
         for block in self.blocks:
             if getattr(self.config, 'grad_cp', 0) == 1 and self.training:
                 x, v_first = torch_checkpoint(block, x, v_first, use_reentrant=False)
@@ -504,8 +520,8 @@ class RWKV7Model(GenerationMixin, nn.Module):
         - att_kv: WKV state [B, H, N, N]
         - ffn_x_prev: FFN x_prev [B, C]
         """
-        H = self.config.n_embd // 64
-        N = 64
+        N = getattr(self.config, 'head_size_a', 64)
+        H = self.config.dim_att // N
         device = next(self.parameters()).device
         dtype = next(self.parameters()).dtype
         
@@ -616,7 +632,6 @@ class RWKV7Model(GenerationMixin, nn.Module):
         ln0_bias_key = 'blocks.0.ln0.bias'
 
         source_has_ln0 = ln0_weight_key in state_dict and ln0_bias_key in state_dict
-        processed_embedding = False
 
         # Handle r_k flatten to match module parameters
         for key in list(new_state_dict.keys()):
@@ -635,16 +650,14 @@ class RWKV7Model(GenerationMixin, nn.Module):
 
         for suffix in ('0', '1', '2'):
             v_key = f'blocks.0.att.v{suffix}'
-            a_key = f'blocks.0.att.a{suffix}'
-            if v_key in new_state_dict:
-                if drop_layer0_v_params:
-                    new_state_dict.pop(v_key, None)
-                elif a_key in new_state_dict:
-                    new_state_dict[v_key] = new_state_dict[a_key]
+            if v_key in new_state_dict and drop_layer0_v_params:
+                # Official implementation ignores layer-0 v params (v_first = v there)
+                new_state_dict.pop(v_key, None)
 
         load_result = super().load_state_dict(new_state_dict, strict=False, assign=assign)
 
-        emb_preprocessed = processed_embedding or not source_has_ln0
+        # Checkpoints without blocks.0.ln0 store a pre-normalized embedding
+        emb_preprocessed = not source_has_ln0
         self._emb_preprocessed = emb_preprocessed
 
         if len(self.blocks) > 0:

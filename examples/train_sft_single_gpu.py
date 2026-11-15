@@ -113,15 +113,16 @@ def format_conversation(
             # User input - no loss computation,但我们显式在结尾追加 eos_token_id
             user_text = f"User: {content}"
             user_tokens = tokenizer.encode(user_text)
+            # 官方 G1 模板 user 轮与 "Assistant:" 之间只有 "\n\n"，没有 eos；
+            # eos_token_id 仅作为显式可选项保留（默认 None = 官方模板行为）
             if eos_token_id is not None:
                 user_tokens.append(eos_token_id)
             else:
-                # 回退到原有行为：使用文本形式的换行
                 user_tokens.extend(tokenizer.encode("\n\n"))
 
             # 后续的 Assistant: 和 THINK_PREFIX 仍然视作 prompt 部分，不计入 loss
-            # 这里不再额外加 "\n\n"，避免在 261 后面再叠加一对换行。
-            suffix_text = f"Assistant:{THINK_PREFIX}"
+            # 官方 G1 模板（RWKV7-G1x-templates.txt）为 "Assistant: <think"，冒号后有空格
+            suffix_text = f"Assistant: {THINK_PREFIX}"
             suffix_tokens = tokenizer.encode(suffix_text)
 
             tokens = user_tokens + suffix_tokens
@@ -133,12 +134,12 @@ def format_conversation(
             # If last_reply_only=True, only the final assistant turn contributes to loss.
             is_target_reply = (not last_reply_only) or (idx == last_assistant_idx)
 
-            # 显式在每条 assistant 回复结尾追加 eos_token_id
+            # assistant 回复结尾：官方 G1 模板用 "\n\n" 分隔下一轮；
+            # eos_token_id 为显式可选项（默认 None = 官方模板行为）
             reply_tokens = tokenizer.encode(content)
             if eos_token_id is not None:
                 reply_tokens.append(eos_token_id)
             else:
-                # 回退：保持原有行为，用文本形式的 "\n\n"
                 reply_tokens.extend(tokenizer.encode("\n\n"))
 
             all_tokens.extend(reply_tokens)
