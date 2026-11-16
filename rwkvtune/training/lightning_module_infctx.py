@@ -76,17 +76,21 @@ class RWKV7InfctxLightningModule(pl.LightningModule):
     Both modes force torch_checkpoint to save layer activations.
     """
 
-    def __init__(self, config, model=None):
+    def __init__(self, config, model=None, lora_config=None):
         super().__init__()
         self.config = config
-        # Accept an externally built model (e.g. a PeftModel) so that LoRA state
-        # is preserved exactly like the standard path; a plain model is built
-        # otherwise. Copying state_dicts between different wrapper types silently
-        # drops LoRA weights (strict=False) and degrades LoRA runs to full-param.
+        self.model = RWKV7Infctx(config)
         if model is not None:
-            self.model = model
-        else:
-            self.model = RWKV7Infctx(config)
+            # Copy base weights from the source model. When the source is a
+            # PeftModel, strip the PEFT prefix so base weights land correctly;
+            # LoRA weights themselves are fresh (new adapter) and applied below.
+            sd = model.state_dict()
+            sd = {k.replace("base_model.model.", ""): v for k, v in sd.items()}
+            self.model.load_state_dict(sd, strict=False)
+        if lora_config is not None:
+            from rwkvtune.peft import LoraConfig as _LoraConfig, get_peft_model as _get_peft_model
+            lc = lora_config if isinstance(lora_config, _LoraConfig) else _LoraConfig(**lora_config)
+            self.model = _get_peft_model(self.model, lc)
         # Loss function (ignore_index=-100 ignores padding/prompt)
         self.criterion = nn.CrossEntropyLoss(ignore_index=-100)
 

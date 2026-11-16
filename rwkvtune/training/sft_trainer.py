@@ -189,12 +189,14 @@ class SFTTrainer:
             from rwkvtune.models.rwkv7.operators import load_cuda_operator_infctx
             load_cuda_operator_infctx()
             # infctx mode does not support direct model input
-            # Pass the model through directly (supports PeftModel/LoRA) — copying
-            # state_dicts here would drop LoRA weights and silently turn a LoRA run
-            # into full-param training.
-            self.lightning_module = RWKV7InfctxLightningModule(self.config, model=model)
-            if model is not None:
-                print("Using passed model directly (preserving LoRA state)...")
+            # Build a fresh RWKV7Infctx inside the module, copy base weights from
+            # the source model, then apply PEFT inside. Copying a PeftModel's
+            # state_dict into a plain model would silently DROP LoRA weights and
+            # degrade a LoRA run to full-param training (caught by rehearse).
+            self.lightning_module = RWKV7InfctxLightningModule(
+                self.config, model=model,
+                lora_config=(self.lora_config if getattr(config, 'use_lora', False) else None),
+            )
         else:
             print(f"Using standard training mode (train_type={self.config.train_type})")
             device_type = 'cpu' if self.config.accelerator == 'cpu' else (
