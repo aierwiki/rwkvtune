@@ -50,3 +50,12 @@ the official RWKV-LM reference at logit level** (first-token logits rel diff ~67
 weights, greedy outputs 0/16 overlap on a base model). rwkvtune/rwkvserve were proven
 bit-exact against the official reference, so the divergence is inside the HF implementation
 (likely its chunked WKV convention or GroupNorm/w scaling). Not investigated further here.
+
+### v15 correction (2026-11-16)
+
+The earlier "HF divergence" note was checked against ALL 4 safetensors shards
+(v8-v14 read shard 1 only — 233/~798 keys, i.e. partially random weights).
+With full weights the HF remote-code vs official-logits disagreement **remains**
+(first-token logits rel ~57, greedy overlap 0/16), so the finding stands: the
+bundled `modeling_rwkv7.py` does not reproduce the official reference outputs
+at logit level, while rwkvtune/rwkvserve are bit-exact to the reference.
