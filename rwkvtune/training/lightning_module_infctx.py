@@ -76,10 +76,17 @@ class RWKV7InfctxLightningModule(pl.LightningModule):
     Both modes force torch_checkpoint to save layer activations.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, model=None):
         super().__init__()
         self.config = config
-        self.model = RWKV7Infctx(config)
+        # Accept an externally built model (e.g. a PeftModel) so that LoRA state
+        # is preserved exactly like the standard path; a plain model is built
+        # otherwise. Copying state_dicts between different wrapper types silently
+        # drops LoRA weights (strict=False) and degrades LoRA runs to full-param.
+        if model is not None:
+            self.model = model
+        else:
+            self.model = RWKV7Infctx(config)
         # Loss function (ignore_index=-100 ignores padding/prompt)
         self.criterion = nn.CrossEntropyLoss(ignore_index=-100)
 
