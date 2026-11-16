@@ -43,7 +43,7 @@ class MultimodalRWKV7Model(nn.Module):
                 grid_thw: torch.Tensor = None, **kw) -> torch.Tensor:
         x = self.rwkv.emb(input_ids)                              # [B, T, C]
         if pixel_values is not None:
-            img = self.embed_images(pixel_values, grid_thw)       # [n_img_tokens, C]
+            img = self.embed_images(pixel_values, grid_thw).to(x.dtype)  # 对齐 dtype(塔/投影器可能与 LLM 精度不同)
             mask = (input_ids == self.image_token_id)
             n_mask = int(mask.sum().item())
             assert n_mask == img.shape[0], (
