@@ -348,7 +348,8 @@ class SFTTrainer:
         config = self.config
         
         # Set device type based on accelerator
-        device_type = 'cpu' if config.accelerator == 'cpu' else 'cuda'
+        device_type = 'cpu' if config.accelerator == 'cpu' else (
+            'cuda' if torch.cuda.is_available() else 'cpu')
         
         if device_type == 'cpu':
             print("\n" + "⚠️ " * 20)

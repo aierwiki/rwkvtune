@@ -157,9 +157,14 @@ class PretrainTrainer:
             self.lightning_module = RWKV7InfctxLightningModule(config)
         else:
             print(f"Using standard training mode (train_type={config.train_type})")
-            device_type = 'cpu' if config.accelerator == 'cpu' else 'cuda'
+            device_type = 'cpu' if config.accelerator == 'cpu' else (
+                'cuda' if torch.cuda.is_available() else 'cpu')
             print(f"Loading RWKV7 {device_type.upper()} standard training operator...")
-            load_wkv_operator(device=device_type, for_inference=False, head_size=config.head_size_a)
+            try:
+                load_wkv_operator(device=device_type, for_inference=False, head_size=config.head_size_a)
+            except Exception as e:
+                print(f"[WARN] {device_type} operator load failed ({e}); using CPU operator")
+                load_wkv_operator(device='cpu', for_inference=False, head_size=config.head_size_a)
             self.lightning_module = RWKV7LightningModule(config)
 
         # Load pretrained weights
