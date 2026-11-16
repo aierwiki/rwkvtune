@@ -206,6 +206,25 @@ class RWKV7LightningModule(pl.LightningModule):
         """Batch -> logits. 多模态子类覆写此钩子注入 pixel_values/grid_thw。"""
         return self(batch["input_ids"])
 
+    def configure_gradient_clipping(self, optimizer, gradient_clip_val,
+                                    gradient_clip_algorithm=None):
+        """先消毒非有限梯度再裁剪。
+
+        inf/NaN 梯度 × clip 系数会产出 NaN 并污染全部权重（clip_grad_norm_
+        的 inf×0=NaN 行为）——随机初始化 + 长序列的 a·b 反馈项可能产生 inf 梯度。
+        非有限梯度所在参数的梯度整体置零（该步跳过更新, 等价于 skip-step）。
+        """
+        if gradient_clip_val and gradient_clip_val > 0:
+            bad = []
+            for p in self.parameters():
+                if p.grad is not None and not torch.isfinite(p.grad).all():
+                    p.grad.zero_()
+                    bad.append(True)
+            if bad:
+                print(f"[grad-sanitize] {len(bad)} 参数出现非有限梯度, 已置零跳过本步")
+        self.clip_gradients(optimizer, gradient_clip_val=gradient_clip_val or 0,
+                            gradient_clip_algorithm=gradient_clip_algorithm)
+
     def configure_optimizers(self):
         """
         Configure optimizer - following RWKV-PEFT parameter grouping
