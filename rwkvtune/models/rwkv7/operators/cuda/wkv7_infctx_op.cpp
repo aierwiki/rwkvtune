@@ -94,7 +94,10 @@ void forward_infctx(
     TORCH_CHECK(b.dtype() == dtype, "All input tensors must have the same dtype");
     TORCH_CHECK(y.dtype() == dtype, "All input tensors must have the same dtype");
     TORCH_CHECK(s.dtype() == torch::kFloat32, "s must be float32");
-    
+    // The kernel allocates `float state[256]` per thread; head_dim above 256 would
+    // write out of bounds. Fail loudly here instead.
+    TORCH_CHECK(C <= 256, "infctx kernel supports head_dim <= 256, got ", C);
+
     TORCH_CHECK(w.is_contiguous(), "w must be contiguous");
     TORCH_CHECK(q.is_contiguous(), "q must be contiguous");
     TORCH_CHECK(k.is_contiguous(), "k must be contiguous");
