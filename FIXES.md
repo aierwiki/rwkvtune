@@ -26,3 +26,27 @@ CUDA kernels unchanged in math (verified same formulas as official `wkv7.cu`).
 - **Sampling flavor**: temperature applied before top-p (HF/OpenAI style) vs official `sample_logits` (temperature after top-p filtering). Kept HF-style for ecosystem compatibility.
 - **Training kernel dtype**: the wind-backstepping training kernel requires bf16 and `T % 16 == 0`; official also supports fp16 ("half better"). Left as-is (fp16 support would need kernel work); documented here.
 - **wkv7s/wkv7 CUDA kernel math**: verified identical to official `wkv7.cu` (state update `s = s*w[j] + k[j]*v + sa*b[j]`, decay `exp(-exp(w))`, per-(b,h,i) row layout). Not modified.
+
+
+## GPU validation (OpenI task 935543, A100-40G, real RWKV7-G1k-1.5B weights)
+
+| Test | Result |
+|---|---|
+| G1 training kernel (wind_backstepping) vs official math, fwd+grads | PASS (pointwise match at bf16) |
+| G2 inference kernel (wkv7s) vs official loop, B>1/T>1, with initial state | PASS |
+| G2 D1 regression: input state buffer unmutated | PASS |
+| G3 real-weights self-consistency (GPT mode vs token-by-token stateful) | PASS (maxdiff 0.031 @ bf16) |
+| G4 D3 regression: two identical requests via scheduler with state cache | PASS (== direct inference) |
+
+Also fixed during GPU validation:
+- **D11 (partial)**: `RUN_CUDA_RWKV7g` now identity-pads T to the kernel's chunk multiple
+  (w=-20 -> decay~1, q/k/v/a/b=0 -> no write) so GPT-mode forwards work for any prompt
+  length instead of raising `T must be divisible by 16`.
+
+## Separate finding (out of scope, recorded)
+
+The HF `modeling_rwkv7.py` remote code bundled with RWKV7-G1k checkpoints **disagrees with
+the official RWKV-LM reference at logit level** (first-token logits rel diff ~67 on identical
+weights, greedy outputs 0/16 overlap on a base model). rwkvtune/rwkvserve were proven
+bit-exact against the official reference, so the divergence is inside the HF implementation
+(likely its chunked WKV convention or GroupNorm/w scaling). Not investigated further here.
