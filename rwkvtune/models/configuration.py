@@ -79,7 +79,10 @@ class RWKVConfig:
             self.dim_att = self.n_embd
         
         if self.dim_ffn is None:
-            self.dim_ffn = int((self.n_embd * 3.5) // 32 * 32)
+            # All released World/G1 checkpoints use a 4x FFN (official train.py
+            # defaults to 3.5x only for brand-new pretraining). Default to 4x so
+            # released checkpoints load; set dim_ffn explicitly to override.
+            self.dim_ffn = self.n_embd * 4
     
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> "RWKVConfig":
