@@ -566,14 +566,21 @@ class SFTTrainer:
 
         # 多模态透传: pixel_values(逐样本 [t_i,3,H,W] 沿帧维拼接) + grid_thw 逐行
         if any("pixel_values" in item for item in batch):
-            pixel_chunks = [item["pixel_values"] for item in batch if "pixel_values" in item]
-            pixel_values = torch.cat(pixel_chunks, dim=0)  # [Σt, 3, H, W]
-            grid_rows = []
+            pixel_chunks, grid_rows = [], []
             for item in batch:
+                if "pixel_values" not in item:
+                    continue
+                pc = item["pixel_values"]
+                if not torch.is_tensor(pc):
+                    pc = torch.tensor(pc, dtype=torch.float32)  # HF/Arrow 存 list
+                pixel_chunks.append(pc)
                 g = item["grid_thw"]
+                if not torch.is_tensor(g):
+                    g = torch.tensor(g, dtype=torch.long)
                 if g.ndim == 1:
                     g = g.unsqueeze(0)
                 grid_rows.append(g)
+            pixel_values = torch.cat(pixel_chunks, dim=0)  # [Σt, 3, H, W]
             grid_thw = torch.cat(grid_rows, dim=0)         # [Σn_img, 3]
             out_batch["pixel_values"] = pixel_values
             out_batch["grid_thw"] = grid_thw
