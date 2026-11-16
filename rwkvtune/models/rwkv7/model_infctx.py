@@ -84,7 +84,9 @@ class RWKV7TimeMixInfctx(RWKV7TimeMix):
                     v.view(B, T, H, -1)).view(B, T, C)
         x_wkv = x_wkv + residual.to(x_wkv.dtype)
         
-        x_out = self.output((x_wkv * g).to(self.output.weight.dtype))
+        # LoRA 包装后的 Linear 没有 .weight 属性 —— 从参数推导 dtype
+        out_dtype = next(self.output.parameters()).dtype
+        x_out = self.output((x_wkv * g).to(out_dtype))
         
         new_shift_state = x[:, -1, :]
         
