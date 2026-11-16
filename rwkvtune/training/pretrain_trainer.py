@@ -257,7 +257,8 @@ class PretrainTrainer:
     def _setup_environment(self):
         """Setup environment variables."""
         config = self.config
-        device_type = 'cpu' if config.accelerator == 'cpu' else 'cuda'
+        device_type = 'cpu' if config.accelerator == 'cpu' else (
+            'cuda' if torch.cuda.is_available() else 'cpu')
 
         if device_type == 'cpu':
             print("\n" + "Warning " * 10)

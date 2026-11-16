@@ -196,9 +196,18 @@ class SFTTrainer:
                 print("Weights loaded")
         else:
             print(f"Using standard training mode (train_type={self.config.train_type})")
-            device_type = 'cpu' if self.config.accelerator == 'cpu' else 'cuda'
+            device_type = 'cpu' if self.config.accelerator == 'cpu' else (
+                'cuda' if torch.cuda.is_available() else 'cpu')
             print(f"Loading RWKV7 {device_type.upper()} standard training operator...")
-            load_wkv_operator(device=device_type, for_inference=False, head_size=self.config.head_size_a)
+            try:
+                load_wkv_operator(device=device_type, for_inference=False,
+                                  head_size=self.config.head_size_a)
+            except Exception as e:
+                # CPU-only machines cannot JIT the CUDA kernel; fall back so that
+                # rehearsal/debug runs still work.
+                print(f"[WARN] {device_type} operator load failed ({e}); using CPU operator")
+                load_wkv_operator(device='cpu', for_inference=False,
+                                  head_size=self.config.head_size_a)
             
             # Pass external model directly (supports LoRA)
             # Use the passed model directly instead of copying weights
