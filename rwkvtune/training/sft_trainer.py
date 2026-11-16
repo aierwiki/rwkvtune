@@ -458,7 +458,9 @@ class SFTTrainer:
             precision=precision,
             max_epochs=config.epoch_count,
             accumulate_grad_batches=config.accumulate_grad_batches,
-            gradient_clip_val=config.grad_clip,
+            # infctx uses manual optimization and clips gradients itself inside
+            # training_step; Lightning forbids Trainer-level clipping there.
+            gradient_clip_val=(config.grad_clip if config.train_type != 'infctx' else None),
             callbacks=callbacks,
             enable_checkpointing=False,
             logger=pl_logger,
