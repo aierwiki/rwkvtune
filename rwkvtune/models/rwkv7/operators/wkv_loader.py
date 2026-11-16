@@ -337,16 +337,28 @@ def load_cuda_operator_train(head_size: int = 64) -> Callable:
         def RUN_CUDA_RWKV7g(q, w, k, v, a, b):
             """RWKV7 CUDA operator call interface."""
             B, T, HC = q.shape
+            # The kernel requires T % CHUNK_LEN(16) == 0. Pad to a multiple with an
+            # identity chunk (w=-20 -> decay=exp(-exp(-20))~1, q/k/v/a/b=0 -> no
+            # write) so arbitrary-length GPT-mode forwards work; outputs are sliced
+            # back to T. Training inputs already divisible by 16 are unaffected.
+            pad = (-T) % 16
+            if pad:
+                q = torch.cat([q, q.new_zeros(B, pad, HC)], dim=1)
+                w = torch.cat([w, w.new_full((B, pad, HC), -20.0)], dim=1)
+                k = torch.cat([k, k.new_zeros(B, pad, HC)], dim=1)
+                v = torch.cat([v, v.new_zeros(B, pad, HC)], dim=1)
+                a = torch.cat([a, a.new_zeros(B, pad, HC)], dim=1)
+                b = torch.cat([b, b.new_zeros(B, pad, HC)], dim=1)
             q = q.to(torch.bfloat16) if q.dtype != torch.bfloat16 else q
             w = w.to(torch.bfloat16) if w.dtype != torch.bfloat16 else w
             k = k.to(torch.bfloat16) if k.dtype != torch.bfloat16 else k
             v = v.to(torch.bfloat16) if v.dtype != torch.bfloat16 else v
             a = a.to(torch.bfloat16) if a.dtype != torch.bfloat16 else a
             b = b.to(torch.bfloat16) if b.dtype != torch.bfloat16 else b
-            q, w, k, v, a, b = [i.view(B, T, HC//head_size, head_size) for i in [q, w, k, v, a, b]]
+            q, w, k, v, a, b = [i.view(B, T + pad, HC//head_size, head_size) for i in [q, w, k, v, a, b]]
             y_chunk = WindBackstepping.apply(w, q, k, v, a, b)
             y_tensor = cast(torch.Tensor, y_chunk)
-            return torch.reshape(y_tensor, (B, T, HC))
+            return torch.reshape(y_tensor, (B, T + pad, HC))[:, :T, :]
         
         _cuda_operator_train[head_size] = RUN_CUDA_RWKV7g
 
