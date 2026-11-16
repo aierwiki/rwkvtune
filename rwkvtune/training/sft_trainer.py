@@ -195,7 +195,7 @@ class SFTTrainer:
             # degrade a LoRA run to full-param training (caught by rehearse).
             self.lightning_module = RWKV7InfctxLightningModule(
                 self.config, model=model,
-                lora_config=(self.lora_config if getattr(config, 'use_lora', False) else None),
+                lora_config=(self.lora_config if getattr(self.config, 'use_lora', False) else None),
             )
         else:
             print(f"Using standard training mode (train_type={self.config.train_type})")
