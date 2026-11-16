@@ -211,13 +211,17 @@ class SFTTrainer:
                 print(f"[WARN] {device_type} operator load failed ({e}); using CPU operator")
                 load_wkv_operator(device='cpu', for_inference=False,
                                   head_size=self.config.head_size_a)
-            
+
             # Pass external model directly (supports LoRA)
             # Use the passed model directly instead of copying weights
             # This preserves LoRA frozen state and model structure
             if model is not None:
                 print("Using passed model directly (preserving LoRA frozen state)...")
-                self.lightning_module = RWKV7LightningModule(self.config, model=self.model)
+                if type(model).__name__ == "MultimodalRWKV7Model":
+                    from rwkvtune.training.vision_lightning import RWKV7VisionLightningModule
+                    self.lightning_module = RWKV7VisionLightningModule(self.config, model=self.model)
+                else:
+                    self.lightning_module = RWKV7LightningModule(self.config, model=self.model)
                 print("Model loaded to Lightning module")
             else:
                 self.lightning_module = RWKV7LightningModule(self.config)
@@ -557,12 +561,24 @@ class SFTTrainer:
         # Convert to Tensor
         input_ids = torch.stack(input_ids)
         labels = torch.stack(labels)
-        
-        return {
-            'input_ids': input_ids,
-            'labels': labels,
-        }
-    
+
+        out_batch = {"input_ids": input_ids, "labels": labels}
+
+        # 多模态透传: pixel_values(逐样本 [t_i,3,H,W] 沿帧维拼接) + grid_thw 逐行
+        if any("pixel_values" in item for item in batch):
+            pixel_chunks = [item["pixel_values"] for item in batch if "pixel_values" in item]
+            pixel_values = torch.cat(pixel_chunks, dim=0)  # [Σt, 3, H, W]
+            grid_rows = []
+            for item in batch:
+                g = item["grid_thw"]
+                if g.ndim == 1:
+                    g = g.unsqueeze(0)
+                grid_rows.append(g)
+            grid_thw = torch.cat(grid_rows, dim=0)         # [Σn_img, 3]
+            out_batch["pixel_values"] = pixel_values
+            out_batch["grid_thw"] = grid_thw
+        return out_batch
+
     def train(self):
         """Start training"""
         print("\n" + "="*80)

@@ -190,20 +190,21 @@ class RWKV7LightningModule(pl.LightningModule):
                 self.resume_model_weights_path = None
             self._reload_optimizer_state()
 
-        input_ids = batch["input_ids"]
-        labels = batch["labels"]
-
-        logits = self(input_ids)
+        logits = self._forward_batch(batch)
 
         # Calculate loss directly (dataset already handles shifting)
 
-        loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+        loss = self.criterion(logits.view(-1, logits.size(-1)), batch["labels"].view(-1))
 
         # L2 regularization (following official implementation)
 
         # Apply L2Wrap following RWKV-PEFT logic
 
         return L2Wrap.apply(loss, logits)
+
+    def _forward_batch(self, batch) -> torch.Tensor:
+        """Batch -> logits. 多模态子类覆写此钩子注入 pixel_values/grid_thw。"""
+        return self(batch["input_ids"])
 
     def configure_optimizers(self):
         """
