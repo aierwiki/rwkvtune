@@ -220,6 +220,15 @@ class SFTTrainer:
                 if type(model).__name__ == "MultimodalRWKV7Model":
                     from rwkvtune.training.vision_lightning import RWKV7VisionLightningModule
                     self.lightning_module = RWKV7VisionLightningModule(self.config, model=self.model)
+                    # peft 只解冻 LoRA 目标 —— 视觉投影器必须可训: 冻结随机投影器
+                    # 虽然数学上仍可学(固定线性映射保信息), 但产物不含它, 推理不可复现
+                    _vcore = self.lightning_module.model
+                    if hasattr(_vcore, "base_model"):
+                        _vcore = _vcore.base_model.model
+                    for _p in _vcore.projector.parameters():
+                        _p.requires_grad_(True)
+                    print(f"[vision] projector 可训 "
+                          f"{sum(p.numel() for p in _vcore.projector.parameters()):,} 参数")
                 else:
                     self.lightning_module = RWKV7LightningModule(self.config, model=self.model)
                 print("Model loaded to Lightning module")

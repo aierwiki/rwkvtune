@@ -248,7 +248,7 @@ def load_cuda_operator_train(head_size: int = 64) -> Callable:
                     print(f"       Compiling CUDA kernel... (other processes will wait)")
                     print(f"       [TIP] Compilation is one-time, subsequent loads will use cache")
                 else:
-                    print(f"[INFO] First time loading RWKV7 CUDA training operator (head_size={head_size})")
+                    print(f"[INFO] First time loading RWKV7 CUDA training operator (head_size={head_size})", flush=True)
                     print("       Compiling CUDA kernel...")
                     print("       [TIP] Compilation is one-time, subsequent loads will use cache")
         else:
@@ -287,7 +287,7 @@ def load_cuda_operator_train(head_size: int = 64) -> Callable:
                 if cache_exists:
                     print(f"[OK] Training operator loaded ({load_time:.2f}s)")
                 else:
-                    print(f"[OK] Training operator compiled and loaded ({load_time:.2f}s)")
+                    print(f"[OK] Training operator compiled and loaded ({load_time:.2f}s)", flush=True)
                     print(f"     Next startup will use cache for faster loading!")
         
         _barrier()

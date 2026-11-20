@@ -40,10 +40,21 @@ class MultimodalRWKV7Model(nn.Module):
         return self.projector(feats)                              # [n_merged, n_embd]
 
     def forward(self, input_ids: torch.Tensor, pixel_values: torch.Tensor = None,
-                grid_thw: torch.Tensor = None, **kw) -> torch.Tensor:
+                grid_thw: torch.Tensor = None, image_feats: torch.Tensor = None,
+                **kw) -> torch.Tensor:
+        """image_feats: 预计算的塔特征 [n_merged, embed_dim](塔冻结时可离线缓存,
+        跳过塔前向与像素搬运 —— v54 提效路径); 与 pixel_values 二选一。"""
         x = self.rwkv.emb(input_ids)                              # [B, T, C]
-        if pixel_values is not None:
+        if image_feats is not None:
+            # 先对齐投影器参数 dtype(LN/Linear 不能混精度), 再对齐 x 的 dtype
+            # (Lightning bf16 = fp32 主权重 + autocast, x 是 fp32; v54 教训)
+            img = self.projector(
+                image_feats.to(next(self.projector.parameters()).dtype)).to(x.dtype)
+        elif pixel_values is not None:
             img = self.embed_images(pixel_values, grid_thw).to(x.dtype)  # 对齐 dtype(塔/投影器可能与 LLM 精度不同)
+        else:
+            img = None
+        if img is not None:
             mask = (input_ids == self.image_token_id)
             n_mask = int(mask.sum().item())
             assert n_mask == img.shape[0], (
